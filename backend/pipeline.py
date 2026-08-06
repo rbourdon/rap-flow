@@ -1,0 +1,271 @@
+import os
+import subprocess
+import tempfile
+import urllib.parse
+from pathlib import Path
+
+# Need numpy and others for later, just stubbing part 1
+import numpy as np
+import librosa
+import soundfile as sf
+import yt_dlp
+import demucs.api
+
+def ingest_audio(input_url_or_path: str, output_path: str):
+    """
+    Ingests audio from a URL using yt-dlp, or from a local path/URL using ffmpeg.
+    Normalizes to 44.1 kHz stereo WAV.
+    """
+    parsed = urllib.parse.urlparse(input_url_or_path)
+    is_url = parsed.scheme in ('http', 'https')
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_download = os.path.join(tmpdir, "downloaded")
+
+        if is_url and ("youtube.com" in input_url_or_path or "youtu.be" in input_url_or_path or "soundcloud.com" in input_url_or_path):
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': tmp_download,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                }],
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([input_url_or_path])
+            tmp_download += ".wav" # yt-dlp appends .wav
+        else:
+            # If it's a direct url or local file, we just rely on ffmpeg to read it directly
+            tmp_download = input_url_or_path
+
+        # Resample to 44.1kHz stereo
+        cmd = [
+            "ffmpeg", "-y", "-i", tmp_download,
+            "-ar", "44100", "-ac", "2", output_path
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    return output_path
+
+def separate_audio(input_wav: str, output_dir: str):
+    """
+    Separates the input wav into vocals and instrumental using Demucs.
+    """
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    separator = demucs.api.Separator(model="htdemucs_ft")
+
+    # demucs API returns a dict of stems: { "vocals": tensor, "no_vocals": tensor } if we configure it right,
+    # but by default htdemucs_ft gives vocals, drums, bass, other.
+    # We will compute no_vocals by subtracting vocals from the mixture, or summing the rest.
+
+    # Load audio
+    _, audio = separator.separate_audio_file(input_wav)
+    # audio is a dict: {'drums': tensor, 'bass': tensor, 'other': tensor, 'vocals': tensor}
+
+    vocals = audio['vocals'].cpu().numpy()
+    # combine drums, bass, other to get instrumental
+    instrumental = audio['drums'] + audio['bass'] + audio['other']
+    instrumental = instrumental.cpu().numpy()
+
+    # separator output is shape (channels, samples)
+    # soundfile expects (samples, channels)
+    vocals = vocals.T
+    instrumental = instrumental.T
+
+    vocals_path = str(out_path / "vocals.wav")
+    instrumental_path = str(out_path / "instrumental.wav")
+
+    # Demucs standard sample rate is 44100 for htdemucs_ft
+    sf.write(vocals_path, vocals, separator.samplerate)
+    sf.write(instrumental_path, instrumental, separator.samplerate)
+
+    return vocals_path, instrumental_path
+
+
+import torchcrepe
+import scipy.signal
+
+def detect_syllables(vocals_wav: str):
+    """
+    Detects syllable events on the vocal stem.
+    Returns a list of dicts: { "t": float, "strength": float, "f0": float, "dur": float }
+    """
+    # Load audio as mono, 22050 Hz for analysis
+    sr_analysis = 22050
+    y, sr = librosa.load(vocals_wav, sr=sr_analysis, mono=True)
+
+    # 1. Band-pass vocal stem ~300-2500 Hz (vowel energy band)
+    sos = scipy.signal.butter(4, [300, 2500], btype='bandpass', fs=sr_analysis, output='sos')
+    y_filtered = scipy.signal.sosfiltfilt(sos, y)
+
+    # 2. Compute smoothed intensity envelope (RMS, ~10ms hop, ~50ms smoothing)
+    hop_length = int(sr_analysis * 0.010) # 10 ms
+    rms = librosa.feature.rms(y=y_filtered, frame_length=2048, hop_length=hop_length)[0]
+
+    # Smooth the RMS envelope
+    win_length = int(0.050 / 0.010) # 50 ms
+    window = np.ones(win_length) / win_length
+    rms_smoothed = np.convolve(rms, window, mode='same')
+
+    # 3. Peak-pick with minimum inter-peak distance (~60 ms) and adaptive threshold
+    min_dist_frames = int(0.060 / 0.010) # 60 ms
+
+    # Adaptive threshold: rolling median
+    rolling_median = scipy.signal.medfilt(rms_smoothed, kernel_size=31) # ~300ms window
+    # peaks must be above rolling median + small epsilon
+    threshold = rolling_median + 0.01
+
+    peaks, _ = scipy.signal.find_peaks(rms_smoothed, distance=min_dist_frames, height=threshold)
+
+    # 4. Gate peaks by voicedness using torchcrepe
+    # torchcrepe expects 16kHz audio, shape (1, samples)
+    y_16k = librosa.resample(y, orig_sr=sr_analysis, target_sr=16000)
+    audio_tensor = torchcrepe.preprocess(y_16k, 16000).unsqueeze(0)
+
+    # Compute pitch and periodicity (confidence)
+    # Use full pitch range for speech
+    fmin = 50
+    fmax = 2000
+    hop_length_crepe = int(16000 * 0.010) # 10 ms hop for alignment with RMS
+
+    pitch, periodicity = torchcrepe.predict(
+        audio_tensor,
+        sample_rate=16000,
+        hop_length=hop_length_crepe,
+        fmin=fmin,
+        fmax=fmax,
+        model='tiny',
+        return_periodicity=True
+    )
+
+    pitch = pitch.squeeze().numpy()
+    periodicity = periodicity.squeeze().numpy()
+
+    events = []
+
+    # Normalize strength per track
+    max_rms = np.max(rms_smoothed) if len(rms_smoothed) > 0 else 1.0
+
+    for peak in peaks:
+        # Align peak frame (22050Hz/10ms) to crepe frame (16000Hz/10ms). They should correspond 1:1 roughly.
+        peak_time = peak * hop_length / sr_analysis
+
+        # crepe time array
+        crepe_frame = int(peak_time / 0.010)
+        crepe_frame = min(crepe_frame, len(periodicity) - 1)
+
+        if periodicity[crepe_frame] > 0.4: # Voicedness threshold
+            # 5. Backtrack to local energy-rise start
+            # Walk backward from peak until RMS drops below a fraction of the peak or starts rising again
+            backtrack_idx = peak
+            while backtrack_idx > 0 and rms_smoothed[backtrack_idx - 1] < rms_smoothed[backtrack_idx]:
+                backtrack_idx -= 1
+                if rms_smoothed[backtrack_idx] < 0.1 * rms_smoothed[peak]:
+                    break
+
+            onset_time = backtrack_idx * hop_length / sr_analysis
+            strength = rms_smoothed[peak] / max_rms
+            f0 = pitch[crepe_frame]
+
+            events.append({
+                "t": onset_time,
+                "strength": float(strength),
+                "f0": float(f0),
+                "dur": 0.1 # placeholder or calculate from voiced segment
+            })
+
+    return events
+
+import mido
+import pyloudnorm as pyln
+
+def generate_click(duration=0.1, sr=44100, f0=440):
+    t = np.linspace(0, duration, int(sr * duration), False)
+    # Simple sine wave with exponential decay
+    click = np.sin(f0 * 2 * np.pi * t) * np.exp(-t * 30)
+    # stereo
+    return np.column_stack((click, click))
+
+def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
+    """
+    Renders percussion from events and mixes with the instrumental.
+    """
+    inst, sr = sf.read(instrumental_wav)
+    if len(inst.shape) == 1:
+        inst = np.column_stack((inst, inst))
+
+    # Pre-generate sample buckets based on overall f0 distribution
+    f0s = [e['f0'] for e in events if e['f0'] > 0]
+    if not f0s:
+        f0s = [200]
+    p33, p66 = np.percentile(f0s, [33, 66])
+
+    samples = {
+        'low': generate_click(sr=sr, f0=150),
+        'mid': generate_click(sr=sr, f0=400),
+        'high': generate_click(sr=sr, f0=800)
+    }
+
+    perc_track = np.zeros_like(inst)
+
+    # Also prepare MIDI
+    mid = mido.MidiFile()
+    track = mido.MidiTrack()
+    mid.tracks.append(track)
+
+    last_time_ticks = 0
+    ticks_per_second = 1000 # easy mapping
+    mid.ticks_per_beat = 500 # standard
+
+    # Sort events by time
+    events.sort(key=lambda x: x['t'])
+
+    for e in events:
+        t_sec = e['t']
+        idx = int(t_sec * sr)
+
+        # determine bucket
+        if e['f0'] < p33:
+            samp = samples['low']
+            note = 36 # Kick
+        elif e['f0'] < p66:
+            samp = samples['mid']
+            note = 38 # Snare
+        else:
+            samp = samples['high']
+            note = 42 # Closed Hat
+
+        gain = (e['strength'] ** 0.6) * 0.8 # perceptual scaling
+        vel = int(min(127, max(1, e['strength'] * 127)))
+
+        # Add to audio
+        end_idx = min(idx + len(samp), len(perc_track))
+        samp_len = end_idx - idx
+        if samp_len > 0:
+            perc_track[idx:end_idx] += samp[:samp_len] * gain
+
+        # Add to MIDI
+        t_ticks = int(t_sec * ticks_per_second)
+        delta_ticks = t_ticks - last_time_ticks
+
+        track.append(mido.Message('note_on', note=note, velocity=vel, time=delta_ticks))
+        track.append(mido.Message('note_off', note=note, velocity=0, time=10)) # short duration
+        last_time_ticks = t_ticks + 10
+
+    midi_path = output_mix_wav.replace('.wav', '.mid')
+    mid.save(midi_path)
+
+    # Mix
+    # Reduce perc by 3dB relative to inst
+    mix = inst + (perc_track * (10 ** (-3 / 20)))
+
+    # Loudness normalization
+    meter = pyln.Meter(sr)
+    loudness = meter.integrated_loudness(mix)
+    normalized_mix = pyln.normalize.loudness(mix, loudness, -14.0)
+
+    sf.write(output_mix_wav, normalized_mix, sr)
+
+    return output_mix_wav, midi_path

@@ -1,0 +1,56 @@
+import { NextResponse } from 'next/server';
+import { prisma } from '@/lib/db';
+import crypto from 'crypto';
+
+const HMAC_SECRET = process.env.HMAC_SECRET || 'dummy-secret-for-dev';
+
+export async function POST(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const body = await request.text();
+    const signature = request.headers.get('x-signature');
+
+    if (!signature) {
+      return NextResponse.json({ error: 'Missing signature' }, { status: 401 });
+    }
+
+    const expectedSignature = crypto
+      .createHmac('sha256', HMAC_SECRET)
+      .update(body)
+      .digest('hex');
+
+    if (signature !== expectedSignature) {
+      return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+    }
+
+    const data = JSON.parse(body);
+
+    if (data.status === 'COMPLETED') {
+      await prisma.job.update({
+        where: { id },
+        data: {
+          status: 'COMPLETED',
+          resultBlobUrl: data.resultUrl,
+          eventsBlobUrl: data.eventsUrl,
+        }
+      });
+    } else if (data.status === 'FAILED') {
+      await prisma.job.update({
+        where: { id },
+        data: {
+          status: 'FAILED',
+          error: data.error,
+        }
+      });
+    }
+
+    return NextResponse.json({ success: true });
+
+  } catch (error) {
+    console.error('Webhook error:', error);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
+  }
+}

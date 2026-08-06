@@ -1,0 +1,10 @@
+modal
+yt-dlp
+ffmpeg-python
+demucs
+librosa
+torchcrepe
+numpy
+soundfile
+mido
+pyloudnorm
