@@ -22,7 +22,7 @@ volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
     volumes={"/root/.cache/torch/hub/checkpoints": volume},
     gpu="T4",
     timeout=600,
-    secrets=[modal.Secret.from_name("rap-flow-secrets", require_match=False)],
+    secrets=[modal.Secret.from_name("rap-flow-secrets")],
     mounts=[modal.Mount.from_local_file("pipeline.py", remote_path="/root/pipeline.py")]
 )
 def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str, blob_token: str = None):
