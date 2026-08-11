@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useEffect } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 
@@ -13,7 +13,7 @@ interface Job {
 }
 
 export function JobList({ initialJobs }: { initialJobs: Job[] }) {
-  const [jobs, setJobs] = useState<Job[]>(initialJobs)
+  const jobs = initialJobs
   const router = useRouter()
 
   useEffect(() => {
@@ -29,10 +29,6 @@ export function JobList({ initialJobs }: { initialJobs: Job[] }) {
     return () => clearInterval(intervalId)
   }, [jobs, router])
 
-  // update local state when props change
-  useEffect(() => {
-    setJobs(initialJobs)
-  }, [initialJobs])
 
   if (jobs.length === 0) {
     return <p>No jobs found.</p>
