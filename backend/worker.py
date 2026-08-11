@@ -13,20 +13,17 @@ image = modal.Image.debian_slim(python_version="3.12") \
     .pip_install(
         "yt-dlp", "ffmpeg-python", "demucs", "librosa",
         "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
-    )
+    ) \
+    .add_local_python_source("pipeline")
 
 volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
-
-# Define mount point
-pipeline_mount = modal.Mount.from_local_python_packages("pipeline")
 
 @app.function(
     image=image,
     volumes={"/root/.cache/torch/hub/checkpoints": volume},
     gpu="T4",
     timeout=600,
-    secrets=[modal.Secret.from_name("rap-flow-secrets")],
-    mounts=[pipeline_mount]
+    secrets=[modal.Secret.from_name("rap-flow-secrets")]
 )
 def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str, blob_token: str = None):
     import sys
@@ -116,7 +113,7 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
 
 
 @app.function(image=image)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def web_trigger(data: Dict[str, Any]):
     job_id = data.get("jobId")
     source_url = data.get("sourceUrl")
