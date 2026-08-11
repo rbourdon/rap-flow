@@ -3,6 +3,8 @@ import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { UploadWidget } from '@/components/Upload'
 import { JobList } from '@/components/JobList'
+import { AuthForm } from '@/components/AuthForm'
+import { SignOutButton } from '@/components/SignOutButton'
 
 export default async function Home() {
   const session = await auth.api.getSession({
@@ -11,9 +13,9 @@ export default async function Home() {
 
   if (!session?.user) {
     return (
-      <main className="p-8">
-        <h1 className="text-2xl font-bold mb-4">Rap Flow → Percussion Track Generator</h1>
-        <p className="mb-4">Please sign in to continue.</p>
+      <main className="p-8 max-w-4xl mx-auto flex flex-col items-center justify-center min-h-[60vh]">
+        <h1 className="text-2xl font-bold mb-8">Rap Flow → Percussion Track Generator</h1>
+        <AuthForm />
       </main>
     )
   }
@@ -25,7 +27,10 @@ export default async function Home() {
 
   return (
     <main className="p-8 max-w-4xl mx-auto">
-      <h1 className="text-2xl font-bold mb-6">Rap Flow → Percussion Track Generator</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Rap Flow → Percussion Track Generator</h1>
+        <SignOutButton />
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <div>
