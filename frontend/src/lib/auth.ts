@@ -20,8 +20,11 @@ export const auth = betterAuth({
     database: prismaAdapter(prisma, {
         provider: "postgresql",
     }),
-    emailAndPassword: {
-        enabled: true,
+    socialProviders: {
+        google: {
+            clientId: process.env.GOOGLE_CLIENT_ID as string,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+        }
     },
     // Required to be set in Next.js when deploying to Vercel/dynamic hosts
     baseURL: getBaseURL(),
