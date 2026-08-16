@@ -1,13 +1,9 @@
 import { Pool, neonConfig } from '@neondatabase/serverless'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { PrismaClient } from '@prisma/client'
+import ws from 'ws'
 
-// Next.js (Node >= 20, or Edge) has built-in WebSocket support.
-if (typeof WebSocket !== 'undefined') {
-  neonConfig.webSocketConstructor = WebSocket
-} else if (typeof globalThis.WebSocket !== 'undefined') {
-  neonConfig.webSocketConstructor = globalThis.WebSocket
-}
+neonConfig.webSocketConstructor = ws
 
 const connectionString = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/postgres'
 
