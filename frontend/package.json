@@ -12,12 +12,14 @@
     "@neondatabase/serverless": "^1.1.0",
     "@prisma/adapter-neon": "^7.9.1",
     "@prisma/client": "^7.9.1",
+    "@types/ws": "^8.18.1",
     "@vercel/blob": "^2.6.1",
     "better-auth": "^1.6.26",
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "wavesurfer.js": "^7.12.11"
+    "wavesurfer.js": "^7.12.11",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
