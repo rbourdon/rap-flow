@@ -1,11 +1,14 @@
 import { Pool, neonConfig } from '@neondatabase/serverless'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { PrismaClient } from '@prisma/client'
-import ws from 'ws'
+import { WebSocket } from 'ws'
 
-neonConfig.webSocketConstructor = ws
+neonConfig.webSocketConstructor = WebSocket
 
-const connectionString = process.env.DATABASE_URL ? String(process.env.DATABASE_URL) : 'postgresql://postgres:postgres@localhost:5432/postgres'
+const connectionString =
+  typeof process.env.DATABASE_URL === 'string' && process.env.DATABASE_URL.length > 0
+    ? process.env.DATABASE_URL
+    : '******localhost:5432/postgres'
 
 const pool = new Pool({ connectionString })
 // @ts-expect-error - Pool type from serverless doesn't perfectly match PoolConfig expected by PrismaNeon
