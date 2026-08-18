@@ -21,6 +21,29 @@ const getBaseURL = () => {
   return process.env.NODE_ENV === "production" ? "https://your-production-url.com" : "http://localhost:3000";
 };
 
+// Build the list of origins Better Auth should trust. `VERCEL_URL` only reflects the
+// ephemeral per-deployment URL (e.g. preview builds), not stable domains such as the
+// production `*.vercel.app` alias or a custom domain. To support those, additional
+// origins can be supplied via the comma-separated `BETTER_AUTH_TRUSTED_ORIGINS` env var.
+const getTrustedOrigins = (baseURL: string) => {
+  const origins = new Set<string>([baseURL]);
+
+  const vercelUrl = getEnvString(process.env.VERCEL_URL);
+  if (vercelUrl) {
+    origins.add(`https://${vercelUrl}`);
+  }
+
+  const extraOrigins = getEnvString(process.env.BETTER_AUTH_TRUSTED_ORIGINS)
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  for (const origin of extraOrigins) {
+    origins.add(origin);
+  }
+
+  return Array.from(origins);
+};
+
 export const auth = betterAuth({
     secret: getEnvString(process.env.BETTER_AUTH_SECRET, "default_secret_for_dev_so_build_does_not_fail"),
     database: prismaAdapter(prisma, {
@@ -34,6 +57,8 @@ export const auth = betterAuth({
     },
     // Required to be set in Next.js when deploying to Vercel/dynamic hosts
     baseURL: getBaseURL(),
-    // Allow the specific Vercel deployment URL if it exists
-    trustedOrigins: getEnvString(process.env.VERCEL_URL) ? [`https://${getEnvString(process.env.VERCEL_URL)}`] : [],
+    // Always trust the resolved base URL, the current Vercel deployment URL (if any),
+    // and any additional origins configured via BETTER_AUTH_TRUSTED_ORIGINS (e.g. the
+    // stable production `*.vercel.app` alias or a custom domain).
+    trustedOrigins: getTrustedOrigins(getBaseURL()),
 });
