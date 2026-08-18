@@ -1,4 +1,4 @@
-import { Pool, neonConfig } from '@neondatabase/serverless'
+import { neonConfig } from '@neondatabase/serverless'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { PrismaClient } from '@prisma/client'
 import { WebSocket } from 'ws'
@@ -19,9 +19,14 @@ function createPrismaClient(): PrismaClient {
     throw new Error('DATABASE_URL environment variable is not set')
   }
 
-  const pool = new Pool({ connectionString })
-  // @ts-expect-error - Pool type from serverless doesn't perfectly match PoolConfig expected by PrismaNeon
-  const adapter = new PrismaNeon(pool)
+  // PrismaNeon is a driver adapter *factory*: it expects the raw Neon pool
+  // config (e.g. `{ connectionString }`) and creates its own internal Pool.
+  // Passing an already-constructed `Pool` instance here (as this code
+  // previously did) causes the Pool's own `options` object to be forwarded
+  // to `neon.Pool`'s constructor as if it were part of the connection
+  // config, which then leaks into the Postgres startup packet and crashes
+  // `addCString` with "Received an instance of Object".
+  const adapter = new PrismaNeon({ connectionString })
   return new PrismaClient({ adapter })
 }
 
