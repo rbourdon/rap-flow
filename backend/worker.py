@@ -9,7 +9,7 @@ from typing import Dict, Any
 app = modal.App("rap-flow-worker")
 
 image = modal.Image.debian_slim(python_version="3.12") \
-    .apt_install("ffmpeg", "nodejs") \
+    .apt_install("ffmpeg", "nodejs", "git") \
     .run_commands(
         "git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil",
         "cd /opt/bgutil/server && npm ci && npx tsc"
