@@ -5,6 +5,21 @@ import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
 
+function formatJobError(error: string): string {
+  if (error.startsWith('AUTH_REQUIRED')) {
+    return 'YouTube requires sign-in verification for this video and rejected the download. ' +
+      'The server operator needs to configure a YT_COOKIES secret (exported from a logged-in ' +
+      'browser session) so yt-dlp can authenticate. See the backend setup docs for details.'
+  }
+  if (error.startsWith('VIDEO_UNAVAILABLE')) {
+    return 'This video is unavailable (it may be private, region-locked, or removed).'
+  }
+  if (error.startsWith('UNSUPPORTED_SOURCE')) {
+    return error.replace('UNSUPPORTED_SOURCE: ', '')
+  }
+  return error
+}
+
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth.api.getSession({
     headers: await headers()
@@ -50,7 +65,7 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
         <p><strong className="text-white/80">Status:</strong> {job.status}</p>
         <p><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
         <p><strong className="text-white/80">Created:</strong> {new Date(job.createdAt).toLocaleString()}</p>
-        {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {job.error}</p>}
+        {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {formatJobError(job.error)}</p>}
       </div>
 
       {job.status === 'COMPLETED' && job.resultBlobUrl && (
