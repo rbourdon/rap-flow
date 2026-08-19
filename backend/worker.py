@@ -47,12 +47,13 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
     # Try to get blob token from env if not passed explicitly (set up in modal secrets)
     token = blob_token or os.environ.get("BLOB_READ_WRITE_TOKEN")
 
-    # Get optional cookies
+    # Get optional cookies / proxy (used to route around datacenter IP blocks)
     yt_cookies = os.environ.get("YT_COOKIES")
+    yt_proxy = os.environ.get("YT_PROXY")
 
     try:
         input_wav = os.path.join(outdir, "input.wav")
-        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies)
+        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy)
 
         vocals_wav, inst_wav = pipeline.separate_audio(input_wav, outdir)
 

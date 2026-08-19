@@ -38,7 +38,7 @@ def classify_yt_dlp_error(e: Exception) -> str:
 
     return f"INGEST_FAILED: {err_str}"
 
-def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None):
+def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None, yt_proxy: str = None):
     """
     Ingests audio from a URL using yt-dlp, or from a local path/URL using ffmpeg.
     Normalizes to 44.1 kHz stereo WAV.
@@ -63,6 +63,13 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                 }],
                 'noplaylist': True,
             }
+            if yt_proxy:
+                # Routes both the metadata/API requests and the actual media
+                # download through the given proxy (e.g. a residential/mobile
+                # proxy) instead of the worker's own (datacenter) egress IP.
+                # Accepts any scheme yt-dlp/urllib support: http://, https://,
+                # socks5://, optionally with embedded user:pass@ credentials.
+                ydl_opts['proxy'] = yt_proxy
             if yt_cookies:
                 cookies_path = os.path.join(tmpdir, "cookies.txt")
                 with open(cookies_path, "w") as f:

@@ -46,11 +46,46 @@ auth problem. Options in that case (roughly in order of preference):
 1. Make sure `yt-dlp` and `bgutil-ytdlp-pot-provider` are pinned to recent versions —
    YouTube/extractor compatibility changes frequently.
 2. Try alternate `player_client` values in `extractor_args` (already using `ios,web`).
-3. As a last resort, route the request through a residential/mobile proxy so it isn't
-   coming from a datacenter IP; only fall back to account cookies (from a throwaway
-   account, per yt-dlp's caution) if the video actually requires sign-in.
+3. Route the request through a residential/mobile proxy (see below) so it isn't coming
+   from a datacenter IP; only fall back to account cookies (from a throwaway account,
+   per yt-dlp's caution) if the video actually requires sign-in.
 
-If cookies genuinely are needed (age-restricted/members-only/private content):
+### Using a proxy to avoid datacenter-IP blocks
+
+`ingest_audio` accepts an optional `yt_proxy` argument, which is wired straight into
+yt-dlp's `proxy` option (used for both the metadata/API lookups and the actual media
+download). `worker.py` and `cli.py` read this from a `YT_PROXY` environment variable, so
+no code changes are needed to enable it.
+
+Since a self-hosted server will always live in a datacenter, this needs to be a paid
+proxy service that provides residential or mobile IPs (the server's own IP is never
+used directly). Providers commonly used for this include Bright Data, Oxylabs,
+Smartproxy/Decodo, IPRoyal, and Webshare — any of these that offer a
+"residential"/"mobile" proxy product with a standard `http://` or `socks5://` endpoint
+will work. Evaluate based on cost-per-GB, session/rotation behavior (rotating per-request
+IPs are more resilient to rate limiting than a single sticky IP), and legitimate/ethical
+sourcing of their IP pool, since offerings vary widely on that last point.
+
+To enable it:
+
+1. Sign up for a residential/mobile proxy plan and get its connection string, e.g.
+   `******gate.proxyprovider.example:8000`.
+2. Add it as a `YT_PROXY` value in the `rap-flow-secrets` Modal secret (`modal secret
+   create rap-flow-secrets YT_PROXY=******host:port ...` or via the Modal
+   dashboard, alongside any existing secret values).
+3. Redeploy the worker. If `YT_PROXY` is set, all YouTube/SoundCloud requests in
+   `ingest_audio` are routed through it automatically; if unset, requests go out on the
+   worker's normal (datacenter) IP as before.
+
+Proxy traffic adds latency and costs money per GB, so it's worth reserving for videos
+that actually hit the bot-check rather than always routing every request through it,
+unless failures become frequent enough that it's worth the cost.
+
+### If cookies genuinely are needed (account-gated content only)
+
+For content that actually requires an account — private/unlisted-to-account,
+age-restricted, or members-only videos — cookies are the correct and documented
+solution:
 
 1. Export cookies from a browser where you're logged into YouTube, in Netscape
    `cookies.txt` format, following the
