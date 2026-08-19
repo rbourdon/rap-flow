@@ -37,29 +37,26 @@ export function JobList({ initialJobs }: { initialJobs: Job[] }) {
   return (
     <ul className="flex flex-col gap-2">
       {jobs.map((job) => (
-        <li key={job.id} className="border p-4 rounded-lg flex justify-between items-center bg-white shadow-sm">
-          <div>
-            <span className="font-medium text-sm text-gray-500">
-              {new Date(job.createdAt).toLocaleString()}
-            </span>
-            <div className="text-lg text-black truncate max-w-[200px]" title={job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}>
-              {job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}
+        <li key={job.id} className="border rounded-lg bg-white shadow-sm hover:bg-gray-50 transition">
+          <Link href={`/jobs/${job.id}`} className="p-4 flex justify-between items-center w-full">
+            <div>
+              <span className="font-medium text-sm text-gray-500">
+                {new Date(job.createdAt).toLocaleString()}
+              </span>
+              <div className="text-lg text-black truncate max-w-[200px]" title={job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}>
+                {job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}
+              </div>
             </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <span className={`px-2 py-1 text-xs rounded text-white ${
-              job.status === 'COMPLETED' ? 'bg-green-500' :
-              job.status === 'FAILED' ? 'bg-red-500' :
-              'bg-yellow-500'
-            }`}>
-              {job.status}
-            </span>
-            {job.status === 'COMPLETED' && (
-              <Link href={`/jobs/${job.id}`} className="text-blue-500 hover:underline">
-                View
-              </Link>
-            )}
-          </div>
+            <div className="flex items-center gap-4">
+              <span className={`px-2 py-1 text-xs rounded text-white ${
+                job.status === 'COMPLETED' ? 'bg-green-500' :
+                job.status === 'FAILED' ? 'bg-red-500' :
+                'bg-yellow-500'
+              }`}>
+                {job.status}
+              </span>
+            </div>
+          </Link>
         </li>
       ))}
     </ul>
