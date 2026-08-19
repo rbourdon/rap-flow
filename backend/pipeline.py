@@ -11,7 +11,34 @@ import soundfile as sf
 import yt_dlp
 import demucs.api
 
-def ingest_audio(input_url_or_path: str, output_path: str):
+
+class IngestError(Exception):
+    pass
+
+def classify_yt_dlp_error(e: Exception) -> str:
+    err_str = str(e)
+    # AUTH_REQUIRED checks
+    auth_indicators = [
+        "Sign in to confirm you're not a bot",
+        "Sign in to confirm your age",
+        "cookies"
+    ]
+    if any(ind.lower() in err_str.lower() for ind in auth_indicators):
+        return f"AUTH_REQUIRED: {err_str}"
+
+    # VIDEO_UNAVAILABLE checks
+    unavailable_indicators = [
+        "Video unavailable",
+        "Private video",
+        "This video is unavailable",
+        "blocked it on copyright grounds"
+    ]
+    if any(ind.lower() in err_str.lower() for ind in unavailable_indicators):
+        return f"VIDEO_UNAVAILABLE: {err_str}"
+
+    return f"INGEST_FAILED: {err_str}"
+
+def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None):
     """
     Ingests audio from a URL using yt-dlp, or from a local path/URL using ffmpeg.
     Normalizes to 44.1 kHz stereo WAV.
@@ -26,14 +53,48 @@ def ingest_audio(input_url_or_path: str, output_path: str):
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': tmp_download,
-                'extractor_args': {'youtube': ['player_client=ios,web']},
+                'extractor_args': {
+                    'youtube': ['player_client=ios,web', 'po_token=web+bgutil:script-node'],
+                    'youtubepot-bgutilscript': ['server_home=/opt/bgutil/server']
+                },
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'wav',
                 }],
+                'noplaylist': True,
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([input_url_or_path])
+            if yt_cookies:
+                cookies_path = os.path.join(tmpdir, "cookies.txt")
+                with open(cookies_path, "w") as f:
+                    f.write(yt_cookies)
+                ydl_opts['cookiefile'] = cookies_path
+
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info_dict = ydl.extract_info(input_url_or_path, download=False)
+
+                    if info_dict:
+                        is_live = info_dict.get('is_live')
+                        if is_live:
+                            raise IngestError("UNSUPPORTED_SOURCE: Livestreams are not supported.")
+
+                        # yt-dlp usually returns the video info if 'v' and 'list' are present because of noplaylist=True
+                        # We also check for 'entries' in case it's a playlist only url
+                        if 'entries' in info_dict:
+                            # It's a playlist
+                            entries = list(info_dict['entries'])
+                            if len(entries) > 1 and not ('v=' in input_url_or_path and 'list=' in input_url_or_path):
+                                raise IngestError("UNSUPPORTED_SOURCE: Playlist URLs are not supported. Please provide a single video URL.")
+
+                        duration = info_dict.get('duration')
+                        max_duration = int(os.environ.get("MAX_SOURCE_DURATION_SEC", 900))
+                        if duration and duration > max_duration:
+                            raise IngestError(f"UNSUPPORTED_SOURCE: Audio source exceeds maximum duration of {max_duration} seconds ({duration}s).")
+
+                    ydl.download([input_url_or_path])
+            except yt_dlp.utils.DownloadError as e:
+                raise IngestError(classify_yt_dlp_error(e))
+
             tmp_download += ".wav" # yt-dlp appends .wav
         else:
             # If it's a direct url or local file, we just rely on ffmpeg to read it directly

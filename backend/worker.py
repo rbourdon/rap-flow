@@ -10,8 +10,12 @@ app = modal.App("rap-flow-worker")
 
 image = modal.Image.debian_slim(python_version="3.12") \
     .apt_install("ffmpeg", "nodejs") \
+    .run_commands(
+        "git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil",
+        "cd /opt/bgutil/server && npm ci && npx tsc"
+    ) \
     .pip_install(
-        "yt-dlp", "ffmpeg-python", "demucs", "librosa",
+        "yt-dlp", "bgutil-ytdlp-pot-provider", "ffmpeg-python", "demucs", "librosa",
         "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
     ) \
     .add_local_python_source("pipeline")
@@ -38,9 +42,12 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
     # Try to get blob token from env if not passed explicitly (set up in modal secrets)
     token = blob_token or os.environ.get("BLOB_READ_WRITE_TOKEN")
 
+    # Get optional cookies
+    yt_cookies = os.environ.get("YT_COOKIES")
+
     try:
         input_wav = os.path.join(outdir, "input.wav")
-        pipeline.ingest_audio(input_url, input_wav)
+        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies)
 
         vocals_wav, inst_wav = pipeline.separate_audio(input_wav, outdir)
 
@@ -92,11 +99,20 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
         }
 
     except Exception as e:
-        print(f"Error in job {job_id}: {e}")
+        err_msg = str(e)
+        print(f"Error in job {job_id}: {err_msg}")
+
+        # If it's already classified, use it. Otherwise, assume ingest or general failure if it's from pipeline
+        if not (err_msg.startswith("AUTH_REQUIRED") or
+                err_msg.startswith("VIDEO_UNAVAILABLE") or
+                err_msg.startswith("UNSUPPORTED_SOURCE") or
+                err_msg.startswith("INGEST_FAILED")):
+            err_msg = f"INGEST_FAILED: {err_msg}"
+
         payload = {
             "jobId": job_id,
             "status": "FAILED",
-            "error": str(e)
+            "error": err_msg
         }
 
     body = json.dumps(payload).encode('utf-8')
