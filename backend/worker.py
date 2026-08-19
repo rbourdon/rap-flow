@@ -9,8 +9,13 @@ from typing import Dict, Any
 app = modal.App("rap-flow-worker")
 
 image = modal.Image.debian_slim(python_version="3.12") \
-    .apt_install("ffmpeg", "nodejs", "npm", "git") \
+    .apt_install("ffmpeg", "git", "curl") \
     .run_commands(
+        # debian_slim ships an ancient Node.js (v12) which can't run modern
+        # tooling (npm, tsc) required by bgutil-ytdlp-pot-provider. Install a
+        # current Node.js LTS (>=20) from NodeSource instead.
+        "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
+        "apt-get install -y nodejs",
         "git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil",
         "cd /opt/bgutil/server && npm ci && npx tsc"
     ) \
