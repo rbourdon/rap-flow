@@ -13,7 +13,7 @@ def main():
     input_wav = os.path.join(args.outdir, "input.wav")
 
     print(f"Ingesting {args.input}...")
-    ingest_audio(args.input, input_wav)
+    ingest_audio(args.input, input_wav, yt_cookies=os.environ.get("YT_COOKIES"))
 
     print("Separating stems...")
     vocals_wav, inst_wav = separate_audio(input_wav, args.outdir)
