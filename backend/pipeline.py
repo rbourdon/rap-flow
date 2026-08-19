@@ -26,6 +26,7 @@ def ingest_audio(input_url_or_path: str, output_path: str):
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': tmp_download,
+                'extractor_args': {'youtube': ['player_client=ios,web']},
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'wav',
