@@ -6,37 +6,57 @@ percussion-augmented mix.
 
 ## YouTube ingestion & the "Sign in to confirm you're not a bot" error
 
-YouTube aggressively rate-limits and bot-checks anonymous downloads. The worker already
-ships with the `bgutil-ytdlp-pot-provider` (a PO token provider) configured in
-`ingest_audio`. **This is a separate mechanism from cookies and does not replace them.**
+The worker ships with the `bgutil-ytdlp-pot-provider` (a PO token provider) configured
+in `ingest_audio`, which supplies PO tokens so requests aren't rejected by YouTube's
+format/GVS checks. This is working as intended and is unrelated to account cookies.
 
-- **PO tokens** attest that a request is coming from a genuine client. They are mainly
-  used to avoid `HTTP 403` errors on Google Video Server (GVS) / format-URL requests,
-  and are not tied to a specific YouTube account.
-- The **"Sign in to confirm you're not a bot"** error is a separate bot/CAPTCHA check
-  based on the *reputation of the calling IP address* (see the [yt-dlp
-  FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)).
-  Cloud/datacenter IPs — like the ones Modal's workers run on — are frequently flagged,
-  regardless of whether a valid PO token is supplied. The
-  [bgutil-ytdlp-pot-provider README](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
-  itself notes: *"Providing a PO token does not guarantee bypassing 403 errors or bot
-  checks, but it may help your traffic seem more legitimate."*
-
-So the PO token provider and cookies solve different problems, and a video can still hit
-the bot-check even with the PO token provider working correctly:
+Separately, `yt-dlp` may still surface an `AUTH_REQUIRED` error whose message contains
+"Sign in...":
 
 ```
 AUTH_REQUIRED: ERROR: [youtube] <id>: Sign in to confirm you're not a bot. ...
 ```
 
-When that happens, supply your own YouTube cookies so `yt-dlp` can authenticate as a
-signed-in user (a logged-in session with a good IP reputation is much less likely to be
-challenged):
+**Important:** this is generic boilerplate text that `yt-dlp` appends to *any* error
+reason containing the phrase "sign in" (see
+[`_video.py`](https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/extractor/youtube/_video.py) -
+search for `if 'sign in' in reason.lower()`), regardless of whether the true cause is:
+
+- The video genuinely requiring an account (private/unlisted-to-account, age-restricted,
+  members-only), **or**
+- YouTube flagging the *IP address* the request came from as suspicious (common for
+  cloud/datacenter IPs, which is what Modal workers use), independent of the PO token.
+
+Per yt-dlp's own docs, cookies are **only recommended/necessary for the first case**:
+
+> This is only necessary for content that requires an account to access, such as private
+> playlists, age-restricted videos and members-only content.
+> — [yt-dlp wiki: Exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
+
+For the second case (IP-reputation bot-check on an otherwise public video), passing
+cookies is **not guaranteed to help** and comes with a real downside: yt-dlp's own
+caution notice warns that using an account this way risks that account being
+temporarily or permanently banned. Do not add cookies purely in reaction to this error
+unless the video is actually account-gated — check whether the video plays fine
+anonymously in a normal browser first.
+
+If a specific public video keeps failing with this error even though it plays fine
+without logging in, treat it as YouTube blocking Modal's IP range rather than an
+auth problem. Options in that case (roughly in order of preference):
+1. Make sure `yt-dlp` and `bgutil-ytdlp-pot-provider` are pinned to recent versions —
+   YouTube/extractor compatibility changes frequently.
+2. Try alternate `player_client` values in `extractor_args` (already using `ios,web`).
+3. As a last resort, route the request through a residential/mobile proxy so it isn't
+   coming from a datacenter IP; only fall back to account cookies (from a throwaway
+   account, per yt-dlp's caution) if the video actually requires sign-in.
+
+If cookies genuinely are needed (age-restricted/members-only/private content):
 
 1. Export cookies from a browser where you're logged into YouTube, in Netscape
-   `cookies.txt` format (e.g. using a browser extension like "Get cookies.txt LOCALLY",
-   or `yt-dlp --cookies-from-browser <browser> --cookies cookies.txt https://youtube.com`
-   run locally).
+   `cookies.txt` format, following the
+   [official export steps](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)
+   (use a private/incognito session so the cookies aren't rotated, and consider a
+   throwaway account since the account is at risk of being banned).
 2. Add the **contents** of that `cookies.txt` file as a `YT_COOKIES` value in the
    `rap-flow-secrets` Modal secret used by `process_job` (`modal secret create
    rap-flow-secrets YT_COOKIES=@cookies.txt ...` or via the Modal dashboard).

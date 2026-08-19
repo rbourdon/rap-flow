@@ -7,9 +7,10 @@ import { WaveSurferPlayer } from './WaveSurferPlayer'
 
 function formatJobError(error: string): string {
   if (error.startsWith('AUTH_REQUIRED')) {
-    return 'YouTube requires sign-in verification for this video and rejected the download. ' +
-      'The server operator needs to configure a YT_COOKIES secret (exported from a logged-in ' +
-      'browser session) so yt-dlp can authenticate. See the backend setup docs for details.'
+    return 'YouTube rejected the download with a sign-in/bot-check prompt. If this video ' +
+      'requires an account (private, age-restricted, or members-only), the server operator ' +
+      'needs to configure a YT_COOKIES secret. Otherwise this is likely YouTube flagging the ' +
+      'server\'s IP address, which cookies may not fix — see the backend setup docs for details.'
   }
   if (error.startsWith('VIDEO_UNAVAILABLE')) {
     return 'This video is unavailable (it may be private, region-locked, or removed).'
