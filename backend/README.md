@@ -8,15 +8,30 @@ percussion-augmented mix.
 
 YouTube aggressively rate-limits and bot-checks anonymous downloads. The worker already
 ships with the `bgutil-ytdlp-pot-provider` (a PO token provider) configured in
-`ingest_audio`, which resolves most cases automatically. However, for some videos
-YouTube will still require an authenticated session, resulting in a job failing with:
+`ingest_audio`. **This is a separate mechanism from cookies and does not replace them.**
+
+- **PO tokens** attest that a request is coming from a genuine client. They are mainly
+  used to avoid `HTTP 403` errors on Google Video Server (GVS) / format-URL requests,
+  and are not tied to a specific YouTube account.
+- The **"Sign in to confirm you're not a bot"** error is a separate bot/CAPTCHA check
+  based on the *reputation of the calling IP address* (see the [yt-dlp
+  FAQ](https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp)).
+  Cloud/datacenter IPs — like the ones Modal's workers run on — are frequently flagged,
+  regardless of whether a valid PO token is supplied. The
+  [bgutil-ytdlp-pot-provider README](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+  itself notes: *"Providing a PO token does not guarantee bypassing 403 errors or bot
+  checks, but it may help your traffic seem more legitimate."*
+
+So the PO token provider and cookies solve different problems, and a video can still hit
+the bot-check even with the PO token provider working correctly:
 
 ```
 AUTH_REQUIRED: ERROR: [youtube] <id>: Sign in to confirm you're not a bot. ...
 ```
 
-To fix this, supply your own YouTube cookies so `yt-dlp` can authenticate as a signed-in
-user:
+When that happens, supply your own YouTube cookies so `yt-dlp` can authenticate as a
+signed-in user (a logged-in session with a good IP reputation is much less likely to be
+challenged):
 
 1. Export cookies from a browser where you're logged into YouTube, in Netscape
    `cookies.txt` format (e.g. using a browser extension like "Get cookies.txt LOCALLY",
