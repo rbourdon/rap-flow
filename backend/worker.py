@@ -9,7 +9,7 @@ from typing import Dict, Any
 app = modal.App("rap-flow-worker")
 
 image = modal.Image.debian_slim(python_version="3.12") \
-    .apt_install("ffmpeg") \
+    .apt_install("ffmpeg", "nodejs") \
     .pip_install(
         "yt-dlp", "ffmpeg-python", "demucs", "librosa",
         "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
