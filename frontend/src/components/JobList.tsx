@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { ClientDate } from '@/components/ClientDate'
 
 interface Job {
   id: string
@@ -41,7 +42,7 @@ export function JobList({ initialJobs }: { initialJobs: Job[] }) {
           <Link href={`/jobs/${job.id}`} className="p-4 flex justify-between items-center w-full">
             <div>
               <span className="font-medium text-sm text-gray-500">
-                {new Date(job.createdAt).toLocaleString()}
+                <ClientDate date={job.createdAt} />
               </span>
               <div className="text-lg text-black truncate max-w-[200px]" title={job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}>
                 {job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}
