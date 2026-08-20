@@ -50,9 +50,12 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
     # Get optional cookies
     yt_cookies = os.environ.get("YT_COOKIES")
 
+    # Get optional residential proxy (e.g. Decodo) to route yt-dlp requests through
+    yt_proxy = os.environ.get("YT_PROXY")
+
     try:
         input_wav = os.path.join(outdir, "input.wav")
-        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies)
+        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy)
 
         vocals_wav, inst_wav = pipeline.separate_audio(input_wav, outdir)
 
