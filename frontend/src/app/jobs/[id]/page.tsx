@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
 import { RetryButton } from './RetryButton'
+import { ClientDate } from '@/components/ClientDate'
 
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth.api.getSession({
@@ -52,7 +53,7 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
           <div>
             <p><strong className="text-white/80">Status:</strong> {job.status}</p>
             <p><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
-            <p><strong className="text-white/80">Created:</strong> {new Date(job.createdAt).toLocaleString()}</p>
+            <p><strong className="text-white/80">Created:</strong> <ClientDate date={job.createdAt} /></p>
             {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {job.error}</p>}
           </div>
           {job.status === 'FAILED' && (
