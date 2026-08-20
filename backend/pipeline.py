@@ -53,6 +53,14 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': tmp_download,
+                # yt-dlp needs an external JS runtime to solve YouTube's nsig
+                # challenges (used to sign download URLs). Without one it
+                # silently falls back to clients whose URLs expire/require no
+                # signing, which results in "HTTP Error 403: Forbidden" when
+                # downloading. The worker image ships Node.js (for
+                # bgutil-ytdlp-pot-provider), so use it here instead of the
+                # default "deno" runtime, which isn't installed.
+                'js_runtimes': {'node': {}},
                 'extractor_args': {
                     'youtube': ['player_client=ios,web', 'po_token=web+bgutil:script-node'],
                     'youtubepot-bgutilscript': ['server_home=/opt/bgutil/server']
