@@ -38,7 +38,7 @@ def classify_yt_dlp_error(e: Exception) -> str:
 
     return f"INGEST_FAILED: {err_str}"
 
-def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None):
+def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None, yt_proxy: str = None):
     """
     Ingests audio from a URL using yt-dlp, or from a local path/URL using ffmpeg.
     Normalizes to 44.1 kHz stereo WAV.
@@ -68,6 +68,10 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                 with open(cookies_path, "w") as f:
                     f.write(yt_cookies)
                 ydl_opts['cookiefile'] = cookies_path
+
+            proxy = yt_proxy or os.environ.get("YT_PROXY")
+            if proxy:
+                ydl_opts['proxy'] = proxy
 
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
