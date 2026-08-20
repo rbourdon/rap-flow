@@ -4,6 +4,7 @@ import { headers } from 'next/headers'
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
+import { RetryButton } from './RetryButton'
 
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth.api.getSession({
@@ -47,10 +48,19 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
       <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-4">Job Details</h1>
 
       <div className="bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm mb-8 text-neutral-400">
-        <p><strong className="text-white/80">Status:</strong> {job.status}</p>
-        <p><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
-        <p><strong className="text-white/80">Created:</strong> {new Date(job.createdAt).toLocaleString()}</p>
-        {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {job.error}</p>}
+        <div className="flex justify-between items-start">
+          <div>
+            <p><strong className="text-white/80">Status:</strong> {job.status}</p>
+            <p><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
+            <p><strong className="text-white/80">Created:</strong> {new Date(job.createdAt).toLocaleString()}</p>
+            {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {job.error}</p>}
+          </div>
+          {job.status === 'FAILED' && (
+            <div>
+              <RetryButton jobId={job.id} />
+            </div>
+          )}
+        </div>
       </div>
 
       {job.status === 'COMPLETED' && job.resultBlobUrl && (
