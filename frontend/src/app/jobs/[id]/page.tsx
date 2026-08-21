@@ -26,12 +26,16 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
     notFound();
   }
 
-  // Fetch events JSON if completed
+  // Fetch events JSON if completed. The blob is stored with private access,
+  // so it must be fetched with the read/write token as a bearer token
+  // rather than requested directly by the browser.
   let events = [];
   if (job.status === 'COMPLETED' && job.eventsBlobUrl) {
     try {
-      // Use standard fetch
-      const res = await fetch(job.eventsBlobUrl);
+      const token = process.env.BLOB_READ_WRITE_TOKEN;
+      const res = await fetch(job.eventsBlobUrl, {
+        headers: token ? { authorization: 'Bearer ' + token } : {},
+      });
       if (res.ok) {
         events = await res.json();
       }
@@ -68,10 +72,10 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
         <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm">
           <h2 className="text-xl font-semibold mb-4">Result Mix</h2>
 
-          <WaveSurferPlayer audioUrl={job.resultBlobUrl} events={events} />
+          <WaveSurferPlayer audioUrl={`/api/jobs/${job.id}/asset?type=mix`} events={events} />
 
           <div className="mt-6">
-            <a href={job.resultBlobUrl} download className="bg-green-500 text-white px-4 py-2 rounded font-medium hover:bg-green-600 transition">
+            <a href={`/api/jobs/${job.id}/asset?type=mix`} download className="bg-green-500 text-white px-4 py-2 rounded font-medium hover:bg-green-600 transition">
               Download Audio
             </a>
           </div>
