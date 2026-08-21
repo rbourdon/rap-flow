@@ -28,9 +28,10 @@ def main():
 
     print("Rendering percussion mix...")
     mix_wav = os.path.join(args.outdir, "mix.wav")
-    render_percussion(events, inst_wav, mix_wav)
+    _, _, perc_only_wav = render_percussion(events, inst_wav, mix_wav)
 
     print(f"Done. Outputs in {args.outdir}/")
+    print(f"Percussion-only render (for verification): {perc_only_wav}")
 
 if __name__ == "__main__":
     main()

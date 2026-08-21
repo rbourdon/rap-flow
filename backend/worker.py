@@ -113,7 +113,7 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
             json.dump(events, f)
 
         mix_wav = os.path.join(outdir, "mix.wav")
-        mix_out, midi_out = pipeline.render_percussion(events, inst_wav, mix_wav)
+        mix_out, midi_out, perc_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
 
         mix_blob_url = ""
         events_blob_url = ""
