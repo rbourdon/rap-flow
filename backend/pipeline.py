@@ -62,8 +62,13 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                 # default "deno" runtime, which isn't installed.
                 'js_runtimes': {'node': {}},
                 'extractor_args': {
-                    'youtube': ['player_client=ios,web', 'po_token=web+bgutil:script-node'],
-                    'youtubepot-bgutilscript': ['server_home=/opt/bgutil/server']
+                    'youtube': {
+                        'player_client': ['ios', 'web'],
+                        'po_token': ['web+bgutil:script-node'],
+                    },
+                    'youtubepot-bgutilscript': {
+                        'server_home': ['/opt/bgutil/server'],
+                    },
                 },
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
