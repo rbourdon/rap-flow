@@ -28,7 +28,18 @@ export async function POST(
 
     const data = JSON.parse(body);
 
-    if (data.status === 'COMPLETED') {
+    if (data.status === 'COMPLETED' && !data.resultUrl) {
+      // Guard against a worker marking a job COMPLETED without producing a
+      // result file, which would otherwise surface a confusing "no result
+      // file was produced" message with no error attached.
+      await prisma.job.update({
+        where: { id },
+        data: {
+          status: 'FAILED',
+          error: 'UPLOAD_FAILED: Job completed without producing a result file.',
+        }
+      });
+    } else if (data.status === 'COMPLETED') {
       await prisma.job.update({
         where: { id },
         data: {
