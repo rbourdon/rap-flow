@@ -34,6 +34,41 @@ image = modal.Image.debian_slim(python_version="3.12") \
 
 volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
 
+
+def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: str):
+    """Upload a file to Vercel Blob and return its public URL.
+
+    Mirrors the request shape used by the `@vercel/blob` SDK (the same
+    client the frontend depends on): uploads go to `vercel.com/api/blob`
+    with the pathname as a query parameter, not as a URL path segment on
+    `blob.vercel-storage.com`, and require an `x-api-version` header. Prior
+    to this fix, requests were sent to the wrong URL/without this header,
+    so the Blob API silently rejected every upload.
+    """
+    import requests
+
+    with open(local_path, "rb") as f:
+        res = requests.put(
+            "https://vercel.com/api/blob/",
+            params={"pathname": pathname},
+            data=f,
+            headers={
+                "authorization": "Bearer " + token,
+                "x-api-version": "12",
+                "x-vercel-blob-access": "public",
+                "x-content-type": content_type,
+            }
+        )
+
+    if not res.ok:
+        raise RuntimeError(
+            f"UPLOAD_FAILED: Failed to upload {pathname} to Vercel Blob "
+            f"(status {res.status_code}): {res.text[:500]}"
+        )
+
+    return res.json().get("url", "")
+
+
 @app.function(
     image=image,
     volumes={"/root/.cache/torch/hub/checkpoints": volume},
@@ -80,35 +115,12 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
         if token:
             print("Uploading results to Vercel Blob...")
 
-            # Upload Mix
-            with open(mix_out, "rb") as f:
-                res = requests.put(
-                    f"https://blob.vercel-storage.com/mix_{job_id}.wav",
-                    data=f,
-                    headers={"authorization": f"Bearer {token}"}
-                )
-                if res.ok:
-                    mix_blob_url = res.json().get("url", "")
-                else:
-                    raise RuntimeError(
-                        f"UPLOAD_FAILED: Failed to upload mix result to Vercel Blob "
-                        f"(status {res.status_code}): {res.text[:500]}"
-                    )
-
-            # Upload Events
-            with open(events_path, "rb") as f:
-                res = requests.put(
-                    f"https://blob.vercel-storage.com/events_{job_id}.json",
-                    data=f,
-                    headers={"authorization": f"Bearer {token}"}
-                )
-                if res.ok:
-                    events_blob_url = res.json().get("url", "")
-                else:
-                    raise RuntimeError(
-                        f"UPLOAD_FAILED: Failed to upload events result to Vercel Blob "
-                        f"(status {res.status_code}): {res.text[:500]}"
-                    )
+            mix_blob_url = _upload_to_blob(
+                mix_out, f"mix_{job_id}.wav", token, "audio/wav"
+            )
+            events_blob_url = _upload_to_blob(
+                events_path, f"events_{job_id}.json", token, "application/json"
+            )
 
         else:
             print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
