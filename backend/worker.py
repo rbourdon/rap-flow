@@ -8,6 +8,13 @@ from typing import Dict, Any
 # Modal configuration
 app = modal.App("rap-flow-worker")
 
+# Keep the bgutil PO Token provider plugin (installed from PyPI below) pinned to
+# the exact same version as the provider server we build from source. A version
+# mismatch between the two halves can make the plugin silently refuse to
+# generate PO Tokens, which in turn causes yt-dlp to drop or 403 on every
+# downloadable YouTube format.
+BGUTIL_VERSION = "1.3.1"
+
 image = modal.Image.debian_slim(python_version="3.12") \
     .apt_install("ffmpeg", "git", "curl") \
     .run_commands(
@@ -16,11 +23,11 @@ image = modal.Image.debian_slim(python_version="3.12") \
         # current Node.js LTS (>=20) from NodeSource instead.
         "curl -fsSL https://deb.nodesource.com/setup_24.x | bash -",
         "apt-get install -y nodejs",
-        "git clone --single-branch --branch 1.3.1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil",
+        f"git clone --single-branch --branch {BGUTIL_VERSION} https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil",
         "cd /opt/bgutil/server && npm ci && npx tsc"
     ) \
     .pip_install(
-        "yt-dlp", "bgutil-ytdlp-pot-provider", "ffmpeg-python", "demucs", "librosa",
+        "yt-dlp", f"bgutil-ytdlp-pot-provider=={BGUTIL_VERSION}", "ffmpeg-python", "demucs", "librosa",
         "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
     ) \
     .add_local_python_source("pipeline")
