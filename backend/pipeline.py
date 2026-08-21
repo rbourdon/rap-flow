@@ -6,6 +6,7 @@ from pathlib import Path
 
 # Need numpy and others for later, just stubbing part 1
 import numpy as np
+import torch
 import librosa
 import soundfile as sf
 import yt_dlp
@@ -246,7 +247,7 @@ def detect_syllables(vocals_wav: str):
     # 4. Gate peaks by voicedness using torchcrepe
     # torchcrepe expects 16kHz audio, shape (1, samples)
     y_16k = librosa.resample(y, orig_sr=sr_analysis, target_sr=16000)
-    audio_tensor = torchcrepe.preprocess(y_16k, 16000).unsqueeze(0)
+    audio_tensor = torch.from_numpy(y_16k).float().unsqueeze(0)
 
     # Compute pitch and periodicity (confidence)
     # Use full pitch range for speech
