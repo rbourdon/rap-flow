@@ -36,7 +36,7 @@ volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
 
 
 def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: str):
-    """Upload a file to Vercel Blob and return its public URL.
+    """Upload a file to Vercel Blob and return its URL.
 
     Mirrors the request shape used by the `@vercel/blob` SDK (the same
     client the frontend depends on): uploads go to `vercel.com/api/blob`
@@ -44,6 +44,12 @@ def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: st
     `blob.vercel-storage.com`, and require an `x-api-version` header. Prior
     to this fix, requests were sent to the wrong URL/without this header,
     so the Blob API silently rejected every upload.
+
+    Uploads are made with `private` access because Blob stores configured
+    for private access reject `public` uploads (400 "Cannot use public
+    access on a private store"). Private blobs aren't fetchable directly
+    from a browser; the frontend must proxy reads through a server route
+    that attaches the `BLOB_READ_WRITE_TOKEN` as a bearer token.
     """
     import requests
 
@@ -55,7 +61,7 @@ def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: st
             headers={
                 "authorization": "Bearer " + token,
                 "x-api-version": "12",
-                "x-vercel-blob-access": "public",
+                "x-vercel-blob-access": "private",
                 "x-content-type": content_type,
             }
         )
