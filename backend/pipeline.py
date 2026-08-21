@@ -75,6 +75,20 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                         # (and fail) to validate it as a real base64url token,
                         # which caused all non-image "web" formats to be
                         # dropped, leaving no downloadable audio/video formats.
+
+                        # Even with the bgutil provider configured, yt-dlp can
+                        # still end up with only image/storyboard formats for
+                        # some videos: the "ios" client always requires a GVS
+                        # PO Token (it has no fallback), and if the provider
+                        # fails or is too slow to supply one for the "web"
+                        # client too, yt-dlp silently drops every non-image
+                        # format instead of erroring out, which then surfaces
+                        # later as "Requested format is not available.".
+                        # Passing formats=missing_pot tells yt-dlp to keep
+                        # those formats instead of skipping them, accepting
+                        # the (rare) risk of a 403 on that specific format
+                        # rather than failing the whole job.
+                        'formats': ['missing_pot'],
                     },
                     'youtubepot-bgutilscript': {
                         'server_home': ['/opt/bgutil/server'],
