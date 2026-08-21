@@ -36,6 +36,17 @@ def classify_yt_dlp_error(e: Exception) -> str:
     if any(ind.lower() in err_str.lower() for ind in unavailable_indicators):
         return f"VIDEO_UNAVAILABLE: {err_str}"
 
+    # 403 checks: YouTube refused to serve the media stream. This almost always
+    # means the server's IP is rate-limited / flagged as a bot, or the chosen
+    # format required a proof-of-origin (PO) token that could not be supplied.
+    if "403" in err_str or "forbidden" in err_str.lower():
+        return (
+            "INGEST_FAILED: YouTube refused to serve the media (HTTP 403 Forbidden). "
+            "This usually means the server's IP address is rate-limited or flagged as a bot. "
+            "Configure a residential proxy (YT_PROXY) and/or account cookies (YT_COOKIES) and retry. "
+            f"Original error: {err_str}"
+        )
+
     return f"INGEST_FAILED: {err_str}"
 
 def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = None, yt_proxy: str = None):
@@ -50,6 +61,40 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
         tmp_download = os.path.join(tmpdir, "downloaded")
 
         if is_url and ("youtube.com" in input_url_or_path or "youtu.be" in input_url_or_path or "soundcloud.com" in input_url_or_path):
+            # By default we do NOT pin a YouTube player client. yt-dlp's
+            # maintainers keep the default client list (currently including
+            # "visionos", whose formats do not require a GVS PO Token) tuned to
+            # whatever currently downloads reliably, so deferring to it gives us
+            # a PO-token-free fallback for free. A specific set can still be
+            # forced without a code change via YT_PLAYER_CLIENT, e.g.
+            # YT_PLAYER_CLIENT="tv,web_safari".
+            #
+            # The previous hard-coded ['ios', 'web'] override was actively
+            # harmful: both clients now *require* a GVS PO Token for their
+            # HTTPS/DASH formats, and the bgutil provider can only mint WebPO
+            # tokens (and even then not reliably from a datacenter IP). yt-dlp
+            # would then either drop every format ("Requested format is not
+            # available") or, with formats=missing_pot, keep the token-gated
+            # format and fail to download it with "HTTP Error 403: Forbidden".
+            youtube_args = {}
+            player_client_env = os.environ.get("YT_PLAYER_CLIENT")
+            if player_client_env:
+                youtube_args['player_client'] = [
+                    c.strip() for c in player_client_env.split(',') if c.strip()
+                ]
+
+            extractor_args = {
+                # The bgutil-ytdlp-pot-provider plugin registers itself with
+                # yt-dlp's PO Token Provider Framework and supplies GVS tokens
+                # for web-based clients automatically. server_home points at the
+                # provider source built into the worker image.
+                'youtubepot-bgutilscript': {
+                    'server_home': ['/opt/bgutil/server'],
+                },
+            }
+            if youtube_args:
+                extractor_args['youtube'] = youtube_args
+
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'outtmpl': tmp_download,
@@ -61,39 +106,15 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                 # bgutil-ytdlp-pot-provider), so use it here instead of the
                 # default "deno" runtime, which isn't installed.
                 'js_runtimes': {'node': {}},
-                'extractor_args': {
-                    'youtube': {
-                        'player_client': ['ios', 'web'],
-                        # Do NOT set 'po_token' here. That option is for
-                        # manually supplying a pre-generated token value (in
-                        # the form "CLIENT.CONTEXT+TOKEN"); it is not a way to
-                        # select a provider. The bgutil-ytdlp-pot-provider
-                        # plugin registers itself with yt-dlp's PO Token
-                        # Provider Framework and supplies GVS tokens for the
-                        # "web" client automatically. Setting a bogus
-                        # "web+bgutil:script-node" value here made yt-dlp try
-                        # (and fail) to validate it as a real base64url token,
-                        # which caused all non-image "web" formats to be
-                        # dropped, leaving no downloadable audio/video formats.
-
-                        # Even with the bgutil provider configured, yt-dlp can
-                        # still end up with only image/storyboard formats for
-                        # some videos: the "ios" client always requires a GVS
-                        # PO Token (it has no fallback), and if the provider
-                        # fails or is too slow to supply one for the "web"
-                        # client too, yt-dlp silently drops every non-image
-                        # format instead of erroring out, which then surfaces
-                        # later as "Requested format is not available.".
-                        # Passing formats=missing_pot tells yt-dlp to keep
-                        # those formats instead of skipping them, accepting
-                        # the (rare) risk of a 403 on that specific format
-                        # rather than failing the whole job.
-                        'formats': ['missing_pot'],
-                    },
-                    'youtubepot-bgutilscript': {
-                        'server_home': ['/opt/bgutil/server'],
-                    },
-                },
+                'extractor_args': extractor_args,
+                # NOTE: do NOT set formats=missing_pot. That option forces
+                # yt-dlp to keep formats that require a GVS PO Token even when no
+                # token is available; those formats then fail to download with
+                # "HTTP Error 403: Forbidden". Leaving it unset lets yt-dlp skip
+                # PO-Token-gated formats and fall back to a client/format that
+                # does not need one.
+                'retries': 3,
+                'fragment_retries': 3,
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'wav',
