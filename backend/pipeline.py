@@ -64,7 +64,17 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                 'extractor_args': {
                     'youtube': {
                         'player_client': ['ios', 'web'],
-                        'po_token': ['web+bgutil:script-node'],
+                        # Do NOT set 'po_token' here. That option is for
+                        # manually supplying a pre-generated token value (in
+                        # the form "CLIENT.CONTEXT+TOKEN"); it is not a way to
+                        # select a provider. The bgutil-ytdlp-pot-provider
+                        # plugin registers itself with yt-dlp's PO Token
+                        # Provider Framework and supplies GVS tokens for the
+                        # "web" client automatically. Setting a bogus
+                        # "web+bgutil:script-node" value here made yt-dlp try
+                        # (and fail) to validate it as a real base64url token,
+                        # which caused all non-image "web" formats to be
+                        # dropped, leaving no downloadable audio/video formats.
                     },
                     'youtubepot-bgutilscript': {
                         'server_home': ['/opt/bgutil/server'],
