@@ -99,7 +99,7 @@ export async function retryJob(jobId: string) {
     throw new Error('Unauthorized');
   }
 
-  if (job.status !== 'FAILED') {
+  if (job.status !== 'FAILED' && !(job.status === 'COMPLETED' && !job.resultBlobUrl)) {
     throw new Error('Only failed jobs can be retried');
   }
 

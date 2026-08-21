@@ -77,6 +77,17 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
           </div>
         </div>
       )}
+
+      {job.status === 'COMPLETED' && !job.resultBlobUrl && (
+        <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm text-neutral-400">
+          <p className="text-red-500">
+            This job finished but no result file was produced. Please retry the job.
+          </p>
+          <div className="mt-4">
+            <RetryButton jobId={job.id} />
+          </div>
+        </div>
+      )}
     </main>
     </div>
   )

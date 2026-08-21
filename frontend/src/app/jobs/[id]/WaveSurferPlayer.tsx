@@ -2,7 +2,6 @@
 
 import React, { useEffect, useRef, useState } from 'react'
 import WaveSurfer from 'wavesurfer.js'
-import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js'
 
 interface EventData {
   t: number
@@ -20,9 +19,15 @@ export function WaveSurferPlayer({ audioUrl, events }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const wavesurfer = useRef<WaveSurfer | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isReady, setIsReady] = useState(false)
+  const [duration, setDuration] = useState(0)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!containerRef.current) return
+
+    setIsReady(false)
+    setError(null)
 
     const ws = WaveSurfer.create({
       container: containerRef.current,
@@ -31,22 +36,14 @@ export function WaveSurferPlayer({ audioUrl, events }: Props) {
       url: audioUrl,
     })
 
-    // Using a separate rendering strategy for large number of events
-    // RegionsPlugin can be slow with thousands of regions.
-    // We might just use simple div markers overlaid if events > 500, but for now just use Regions Plugin.
-    const wsRegions = ws.registerPlugin(RegionsPlugin.create())
-
     ws.on('ready', () => {
-      // Add markers
-      events.forEach(ev => {
-        wsRegions.addRegion({
-          start: ev.t,
-          content: '',
-          color: 'rgba(255, 0, 0, 0.5)',
-          drag: false,
-          resize: false,
-        })
-      })
+      setDuration(ws.getDuration())
+      setIsReady(true)
+    })
+
+    ws.on('error', (err) => {
+      console.error('WaveSurfer failed to load audio', err)
+      setError('Unable to load the audio for playback.')
     })
 
     ws.on('play', () => setIsPlaying(true))
@@ -57,7 +54,7 @@ export function WaveSurferPlayer({ audioUrl, events }: Props) {
     return () => {
       ws.destroy()
     }
-  }, [audioUrl, events])
+  }, [audioUrl])
 
   const onPlayPause = () => {
     wavesurfer.current?.playPause()
@@ -65,10 +62,28 @@ export function WaveSurferPlayer({ audioUrl, events }: Props) {
 
   return (
     <div>
-      <div ref={containerRef} className="w-full mb-4 border rounded" />
+      <div className="relative w-full mb-4">
+        <div ref={containerRef} className="w-full border rounded" />
+        {/* Lightweight overlay markers for detected syllable onsets. Using plain
+            divs (instead of e.g. wavesurfer's RegionsPlugin) keeps this responsive
+            even when there are thousands of events for a long track. */}
+        {isReady && duration > 0 && (
+          <div className="pointer-events-none absolute inset-0">
+            {events.map((ev, i) => (
+              <div
+                key={i}
+                className="absolute top-0 bottom-0 w-px bg-red-500/50"
+                style={{ left: `${Math.min(100, (ev.t / duration) * 100)}%` }}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+      {error && <p className="text-red-500 mb-4">{error}</p>}
       <button
         onClick={onPlayPause}
-        className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+        disabled={!isReady}
+        className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded disabled:opacity-50"
       >
         {isPlaying ? 'Pause' : 'Play'}
       </button>
