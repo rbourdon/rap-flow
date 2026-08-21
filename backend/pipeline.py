@@ -172,9 +172,19 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
 
     return output_path
 
-def separate_audio(input_wav: str, output_dir: str):
+def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0):
     """
     Separates the input wav into vocals and instrumental using Demucs.
+
+    The instrumental bed is built from drums + bass + other, but the real
+    drums stem is attenuated by `drums_duck_db` first. Rendering synthetic,
+    flow-derived percussion on top of an instrumental that still contains the
+    original (full-level) drum track buries the new percussion under the
+    existing beat, since they occupy the same low/mid frequency range and the
+    original drums are usually the loudest element in the mix. Ducking the
+    original drums a bit opens up headroom for the new percussion layer
+    without removing the beat entirely (which would leave holes when the
+    detector misses a syllable).
     """
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
@@ -190,21 +200,29 @@ def separate_audio(input_wav: str, output_dir: str):
     # audio is a dict: {'drums': tensor, 'bass': tensor, 'other': tensor, 'vocals': tensor}
 
     vocals = audio['vocals'].cpu().numpy()
-    # combine drums, bass, other to get instrumental
-    instrumental = audio['drums'] + audio['bass'] + audio['other']
+
+    drums_gain = 10 ** (drums_duck_db / 20)
+    # combine drums (ducked), bass, other to get instrumental
+    instrumental = (audio['drums'] * drums_gain) + audio['bass'] + audio['other']
     instrumental = instrumental.cpu().numpy()
+
+    drums = (audio['drums'].cpu().numpy())
 
     # separator output is shape (channels, samples)
     # soundfile expects (samples, channels)
     vocals = vocals.T
     instrumental = instrumental.T
+    drums = drums.T
 
     vocals_path = str(out_path / "vocals.wav")
     instrumental_path = str(out_path / "instrumental.wav")
+    drums_path = str(out_path / "drums.wav")
 
     # Demucs standard sample rate is 44100 for htdemucs_ft
     sf.write(vocals_path, vocals, separator.samplerate)
     sf.write(instrumental_path, instrumental, separator.samplerate)
+    # Original (unducked) drums stem, kept around for diagnostics/comparison.
+    sf.write(drums_path, drums, separator.samplerate)
 
     return vocals_path, instrumental_path
 
@@ -306,12 +324,89 @@ def detect_syllables(vocals_wav: str):
 import mido
 import pyloudnorm as pyln
 
-def generate_click(duration=0.1, sr=44100, f0=440):
-    t = np.linspace(0, duration, int(sr * duration), False)
-    # Simple sine wave with exponential decay
-    click = np.sin(f0 * 2 * np.pi * t) * np.exp(-t * 30)
-    # stereo
-    return np.column_stack((click, click))
+
+def _shaped_noise(duration, sr, band=None):
+    """White noise, optionally band-limited, used as the "body" of a hit.
+
+    Real percussion is mostly noise (broadband transient energy), not a pure
+    tone. Leaning on shaped noise instead of a single sine gives the
+    synthetic hits a broader spectral footprint that reads as a drum rather
+    than a beep, and lets them sit alongside tonal content (bass/other)
+    without simply doubling a single frequency.
+    """
+    n = int(sr * duration)
+    noise = np.random.default_rng().standard_normal(n)
+    if band is not None:
+        sos = scipy.signal.butter(4, band, btype='bandpass', fs=sr, output='sos')
+        noise = scipy.signal.sosfiltfilt(sos, noise)
+    return noise
+
+
+def generate_hit(kind: str, sr=44100):
+    """
+    Synthesizes a percussive hit with a clear transient and a spectral
+    footprint distinct from the other hit types, instead of a single
+    decaying sine ("click"). Each hit blends a tonal component (for pitch
+    identity) with a shaped-noise component (for the broadband transient
+    real drums have), which is both more audible and more recognizable as
+    percussion when mixed against a busy instrumental.
+    """
+    if kind == 'low':  # kick: pitched sine sweep + short sub thump
+        duration = 0.22
+        t = np.linspace(0, duration, int(sr * duration), False)
+        f_start, f_end = 150.0, 45.0
+        # exponential pitch sweep gives the classic kick "pitch drop"
+        freq = f_end + (f_start - f_end) * np.exp(-t * 18)
+        phase = 2 * np.pi * np.cumsum(freq) / sr
+        tone = np.sin(phase) * np.exp(-t * 14)
+        click = _shaped_noise(duration, sr, band=[800, 4000]) * np.exp(-t * 90)
+        hit = tone * 0.85 + click * 0.35
+    elif kind == 'mid':  # snare: mid tone + broadband noise crack
+        duration = 0.18
+        t = np.linspace(0, duration, int(sr * duration), False)
+        tone = np.sin(2 * np.pi * 190 * t) * np.exp(-t * 35)
+        noise = _shaped_noise(duration, sr, band=[900, 6000]) * np.exp(-t * 22)
+        hit = tone * 0.5 + noise * 0.85
+    else:  # closed hat: short high-passed noise burst
+        duration = 0.08
+        t = np.linspace(0, duration, int(sr * duration), False)
+        noise = _shaped_noise(duration, sr, band=[6000, min(16000, sr / 2 - 100)])
+        hit = noise * np.exp(-t * 60)
+
+    # Normalize peak to 1.0 so downstream gain staging is consistent across kinds
+    peak = np.max(np.abs(hit))
+    if peak > 0:
+        hit = hit / peak
+
+    return np.column_stack((hit, hit))
+
+
+def group_events(events: list, min_gap: float = 0.09):
+    """
+    Merges onsets that land closer together than `min_gap` seconds into a
+    single hit (keeping the strongest one of the group).
+
+    Rap flow can produce syllable onsets only 30-60ms apart; rendering a hit
+    per syllable at that density produces an indistinct wash of overlapping
+    clicks rather than a recognizable beat. Enforcing a minimum inter-hit
+    gap turns the dense onset stream into a sparser, more legible rhythmic
+    pattern.
+    """
+    if not events:
+        return []
+
+    ordered = sorted(events, key=lambda e: e['t'])
+    grouped = [ordered[0]]
+
+    for e in ordered[1:]:
+        if e['t'] - grouped[-1]['t'] < min_gap:
+            if e['strength'] > grouped[-1]['strength']:
+                grouped[-1] = e
+        else:
+            grouped.append(e)
+
+    return grouped
+
 
 def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     """
@@ -321,6 +416,8 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     if len(inst.shape) == 1:
         inst = np.column_stack((inst, inst))
 
+    events = group_events(events)
+
     # Pre-generate sample buckets based on overall f0 distribution
     f0s = [e['f0'] for e in events if e['f0'] > 0]
     if not f0s:
@@ -328,12 +425,18 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     p33, p66 = np.percentile(f0s, [33, 66])
 
     samples = {
-        'low': generate_click(sr=sr, f0=150),
-        'mid': generate_click(sr=sr, f0=400),
-        'high': generate_click(sr=sr, f0=800)
+        'low': generate_hit('low', sr=sr),
+        'mid': generate_hit('mid', sr=sr),
+        'high': generate_hit('high', sr=sr),
     }
 
     perc_track = np.zeros_like(inst)
+    # Sidechain-style ducking envelope: 1.0 = no ducking, dips toward
+    # duck_floor briefly around every hit so the percussion punches through
+    # the instrumental instead of getting masked by it.
+    duck_envelope = np.ones(len(inst))
+    duck_floor = 0.45  # ~ -7 dB dip under each hit
+    duck_release_samples = int(sr * 0.12)
 
     # Also prepare MIDI
     mid = mido.MidiFile()
@@ -362,7 +465,9 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
             samp = samples['high']
             note = 42 # Closed Hat
 
-        gain = (e['strength'] ** 0.6) * 0.8 # perceptual scaling
+        # Perceptual scaling, biased up from the original (0.6 exp, 0.8 max)
+        # so hits are clearly audible rather than a subtle accent.
+        gain = (e['strength'] ** 0.5)
         vel = int(min(127, max(1, e['strength'] * 127)))
 
         # Add to audio
@@ -370,6 +475,14 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
         samp_len = end_idx - idx
         if samp_len > 0:
             perc_track[idx:end_idx] += samp[:samp_len] * gain
+
+        # Duck the instrumental under this hit: quick dip, exponential release
+        duck_end = min(idx + duck_release_samples, len(duck_envelope))
+        duck_len = duck_end - idx
+        if duck_len > 0:
+            release = np.linspace(0, 1, duck_len)
+            dip = duck_floor + (1.0 - duck_floor) * (1 - np.exp(-release * 8))
+            duck_envelope[idx:duck_end] = np.minimum(duck_envelope[idx:duck_end], dip)
 
         # Add to MIDI
         t_ticks = int(t_sec * ticks_per_second)
@@ -382,9 +495,15 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     midi_path = output_mix_wav.replace('.wav', '.mid')
     mid.save(midi_path)
 
-    # Mix
-    # Reduce perc by 3dB relative to inst
-    mix = inst + (perc_track * (10 ** (-3 / 20)))
+    # Percussion-only diagnostic render, so the generated rhythm can be
+    # listened to/verified in isolation from the instrumental bed.
+    perc_only_path = output_mix_wav.replace('.wav', '_perc_only.wav')
+    sf.write(perc_only_path, perc_track, sr)
+
+    # Mix: duck the instrumental around each hit, then layer percussion at
+    # (near) unity gain rather than attenuating it below the instrumental.
+    ducked_inst = inst * duck_envelope[:, np.newaxis]
+    mix = ducked_inst + perc_track
 
     # Loudness normalization
     meter = pyln.Meter(sr)
@@ -393,4 +512,4 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
 
     sf.write(output_mix_wav, normalized_mix, sr)
 
-    return output_mix_wav, midi_path
+    return output_mix_wav, midi_path, perc_only_path
