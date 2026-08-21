@@ -89,6 +89,11 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
                 )
                 if res.ok:
                     mix_blob_url = res.json().get("url", "")
+                else:
+                    raise RuntimeError(
+                        f"UPLOAD_FAILED: Failed to upload mix result to Vercel Blob "
+                        f"(status {res.status_code}): {res.text[:500]}"
+                    )
 
             # Upload Events
             with open(events_path, "rb") as f:
@@ -99,6 +104,11 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
                 )
                 if res.ok:
                     events_blob_url = res.json().get("url", "")
+                else:
+                    raise RuntimeError(
+                        f"UPLOAD_FAILED: Failed to upload events result to Vercel Blob "
+                        f"(status {res.status_code}): {res.text[:500]}"
+                    )
 
         else:
             print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
@@ -121,7 +131,8 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
         if not (err_msg.startswith("AUTH_REQUIRED") or
                 err_msg.startswith("VIDEO_UNAVAILABLE") or
                 err_msg.startswith("UNSUPPORTED_SOURCE") or
-                err_msg.startswith("INGEST_FAILED")):
+                err_msg.startswith("INGEST_FAILED") or
+                err_msg.startswith("UPLOAD_FAILED")):
             err_msg = f"INGEST_FAILED: {err_msg}"
 
         payload = {
