@@ -500,8 +500,22 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     # Loudness normalization
     meter = pyln.Meter(sr)
     loudness = meter.integrated_loudness(mix)
-    normalized_mix = pyln.normalize.loudness(mix, loudness, -14.0)
+
+    # Calculate gain needed to reach -14 LUFS
+    # gain_db = target_lufs - loudness
+    gain_db = -14.0 - loudness
+    gain_linear = 10.0 ** (gain_db / 20.0)
+
+    normalized_mix = mix * gain_linear
+    normalized_perc = perc_track * gain_linear
+    normalized_inst = ducked_inst * gain_linear
 
     sf.write(output_mix_wav, normalized_mix, sr)
 
-    return output_mix_wav, midi_path, perc_only_path
+    # Write normalized individual stems
+    sf.write(perc_only_path, normalized_perc, sr)
+
+    inst_only_path = output_mix_wav.replace('.wav', '_inst_only.wav')
+    sf.write(inst_only_path, normalized_inst, sr)
+
+    return output_mix_wav, midi_path, perc_only_path, inst_only_path

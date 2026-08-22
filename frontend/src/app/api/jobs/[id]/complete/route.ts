@@ -57,8 +57,11 @@ export async function POST(
         where: { id },
         data: {
           status: 'COMPLETED',
+          stage: data.stage,
           resultBlobUrl: data.resultUrl,
           eventsBlobUrl: data.eventsUrl,
+          percBlobUrl: data.percUrl,
+          instBlobUrl: data.instUrl,
         }
       });
     } else if (data.status === 'FAILED') {

@@ -143,13 +143,20 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
             json.dump(events, f)
 
         mix_wav = os.path.join(outdir, "mix.wav")
-        _send_progress_update(job_id, "Synthesizing Beats", callback_url, hmac_secret)
-        mix_out, midi_out, perc_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
+        mix_out, midi_out, perc_only_out, inst_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
+
+        # Notify UI: Uploading results
+        if callback_url and hmac_secret:
+            print("Sending UPLOADING progress update")
+            body = json.dumps({"jobId": job_id, "stage": "UPLOADING"}).encode('utf-8')
+            signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+            headers = {'Content-Type': 'application/json', 'x-signature': signature}
+            requests.post(callback_url, data=body, headers=headers)
 
         mix_blob_url = ""
         events_blob_url = ""
-
-        _send_progress_update(job_id, "Saving Results", callback_url, hmac_secret)
+        perc_blob_url = ""
+        inst_blob_url = ""
 
         if token:
             print("Uploading results to Vercel Blob...")
@@ -160,17 +167,28 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
             events_blob_url = _upload_to_blob(
                 events_path, f"events_{job_id}.json", token, "application/json"
             )
+            perc_blob_url = _upload_to_blob(
+                perc_only_out, f"perc_{job_id}.wav", token, "audio/wav"
+            )
+            inst_blob_url = _upload_to_blob(
+                inst_only_out, f"inst_{job_id}.wav", token, "audio/wav"
+            )
 
         else:
             print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
             mix_blob_url = "https://dummy.blob.vercel-storage.com/mix.wav"
             events_blob_url = "https://dummy.blob.vercel-storage.com/events.json"
+            perc_blob_url = "https://dummy.blob.vercel-storage.com/perc.wav"
+            inst_blob_url = "https://dummy.blob.vercel-storage.com/inst.wav"
 
         payload = {
             "jobId": job_id,
             "status": "COMPLETED",
+            "stage": "COMPLETED",
             "resultUrl": mix_blob_url,
             "eventsUrl": events_blob_url,
+            "percUrl": perc_blob_url,
+            "instUrl": inst_blob_url,
             "events": events
         }
 

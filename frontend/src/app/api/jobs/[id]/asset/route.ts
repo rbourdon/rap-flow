@@ -6,12 +6,14 @@ import { headers } from 'next/headers';
 const ASSET_FIELDS = {
   mix: 'resultBlobUrl',
   events: 'eventsBlobUrl',
+  perc: 'percBlobUrl',
+  inst: 'instBlobUrl',
 } as const;
 
 type AssetType = keyof typeof ASSET_FIELDS;
 
 function isAssetType(value: string | null): value is AssetType {
-  return value === 'mix' || value === 'events';
+  return value === 'mix' || value === 'events' || value === 'perc' || value === 'inst';
 }
 
 // Proxies reads of the job's result files stored in Vercel Blob. The blobs

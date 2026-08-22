@@ -79,6 +79,8 @@ model Job {
   inputBlobUrl  String?
   resultBlobUrl String?
   eventsBlobUrl String?
+  percBlobUrl   String?
+  instBlobUrl   String?
   error         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
