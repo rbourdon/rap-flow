@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
 import { RetryButton } from './RetryButton'
 import { ClientDate } from '@/components/ClientDate'
+import { JobStatusTracker } from './JobStatusTracker'
 
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth.api.getSession({
@@ -66,9 +67,15 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
             </div>
           )}
         </div>
+
       </div>
 
+      {(job.status === 'PENDING' || job.status === 'PROCESSING') && (
+        <JobStatusTracker jobId={job.id} initialStatus={job.status} initialStage={job.stage} />
+      )}
+
       {job.status === 'COMPLETED' && job.resultBlobUrl && (
+
         <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm">
           <h2 className="text-xl font-semibold mb-4">Result Mix</h2>
 
