@@ -1,9 +1,9 @@
 import { neonConfig } from '@neondatabase/serverless'
 import { PrismaNeon } from '@prisma/adapter-neon'
 import { PrismaClient } from '@prisma/client'
-import { WebSocket } from 'ws'
+import ws from 'ws'
 
-neonConfig.webSocketConstructor = WebSocket
+neonConfig.webSocketConstructor = ws
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -14,8 +14,8 @@ const globalForPrisma = globalThis as unknown as {
 // keeps `next build`'s page-data collection (which imports this module) from
 // requiring a database connection string.
 function createPrismaClient(): PrismaClient {
-  const connectionString = process.env.DATABASE_URL
-  if (typeof connectionString !== 'string' || connectionString.length === 0) {
+  const connectionString = String(process.env.DATABASE_URL)
+  if (!connectionString || connectionString === 'undefined') {
     throw new Error('DATABASE_URL environment variable is not set')
   }
 

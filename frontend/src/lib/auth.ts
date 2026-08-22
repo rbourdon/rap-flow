@@ -45,7 +45,7 @@ const getTrustedOrigins = (baseURL: string) => {
 };
 
 export const auth = betterAuth({
-    secret: getEnvString(process.env.BETTER_AUTH_SECRET, "default_secret_for_dev_so_build_does_not_fail"),
+    secret: process.env.BETTER_AUTH_SECRET || "default_secret_for_dev_so_build_does_not_fail",
     database: prismaAdapter(prisma, {
         provider: "postgresql",
     }),
