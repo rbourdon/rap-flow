@@ -73,6 +73,7 @@ model Job {
   userId        String
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   status        String   @default("PENDING")
+  stage         String?
   sourceType    String
   sourceUrl     String?
   inputBlobUrl  String?

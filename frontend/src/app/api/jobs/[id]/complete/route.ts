@@ -26,9 +26,22 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
     }
 
+
     const data = JSON.parse(body);
 
-    if (data.status === 'COMPLETED' && !data.resultUrl) {
+
+    if (data.status === 'PROCESSING') {
+      await prisma.job.update({
+        where: { id },
+        data: {
+          status: 'PROCESSING',
+          stage: data.stage,
+        }
+      });
+      return NextResponse.json({ success: true });
+    } else if (data.status === 'COMPLETED' && !data.resultUrl) {
+
+
       // Guard against a worker marking a job COMPLETED without producing a
       // result file, which would otherwise surface a confusing "no result
       // file was produced" message with no error attached.

@@ -75,6 +75,33 @@ def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: st
     return res.json().get("url", "")
 
 
+
+def _send_progress_update(job_id: str, stage: str, callback_url: str, hmac_secret: str):
+    import requests
+    import json
+    import hmac
+    import hashlib
+
+    payload = {
+        "jobId": job_id,
+        "status": "PROCESSING",
+        "stage": stage
+    }
+
+    body = json.dumps(payload).encode('utf-8')
+    signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+
+    headers = {
+        'Content-Type': 'application/json',
+        'x-signature': signature
+    }
+
+    try:
+        requests.post(callback_url, data=body, headers=headers, timeout=5)
+    except Exception as e:
+        print(f"Failed to send progress update for stage {stage}: {e}")
+
+
 @app.function(
     image=image,
     volumes={"/root/.cache/torch/hub/checkpoints": volume},
@@ -102,21 +129,27 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
     yt_proxy = os.environ.get("YT_PROXY")
 
     try:
+        _send_progress_update(job_id, "Downloading Audio", callback_url, hmac_secret)
         input_wav = os.path.join(outdir, "input.wav")
         pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy)
 
+        _send_progress_update(job_id, "Separating Vocals", callback_url, hmac_secret)
         vocals_wav, inst_wav = pipeline.separate_audio(input_wav, outdir)
 
+        _send_progress_update(job_id, "Analyzing Syllables", callback_url, hmac_secret)
         events = pipeline.detect_syllables(vocals_wav)
         events_path = os.path.join(outdir, "events.json")
         with open(events_path, "w") as f:
             json.dump(events, f)
 
         mix_wav = os.path.join(outdir, "mix.wav")
+        _send_progress_update(job_id, "Synthesizing Beats", callback_url, hmac_secret)
         mix_out, midi_out, perc_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
 
         mix_blob_url = ""
         events_blob_url = ""
+
+        _send_progress_update(job_id, "Saving Results", callback_url, hmac_secret)
 
         if token:
             print("Uploading results to Vercel Blob...")
