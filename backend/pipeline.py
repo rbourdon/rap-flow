@@ -232,46 +232,41 @@ import scipy.signal
 
 def detect_syllables(vocals_wav: str):
     """
-    Detects syllable events on the vocal stem.
-    Returns a list of dicts: { "t": float, "strength": float, "f0": float, "dur": float }
+    Detects syllable events on the vocal stem using spectral onset detection.
+    Returns a list of dicts: { "t": float, "strength": float, "f0": float, "periodicity": float, "dur": float }
     """
     # Load audio as mono, 22050 Hz for analysis
     sr_analysis = 22050
     y, sr = librosa.load(vocals_wav, sr=sr_analysis, mono=True)
 
-    # 1. Band-pass vocal stem ~300-2500 Hz (vowel energy band)
-    sos = scipy.signal.butter(4, [300, 2500], btype='bandpass', fs=sr_analysis, output='sos')
-    y_filtered = scipy.signal.sosfiltfilt(sos, y)
-
-    # 2. Compute smoothed intensity envelope (RMS, ~10ms hop, ~50ms smoothing)
+    # 1. Use librosa's spectral onset detection
     hop_length = int(sr_analysis * 0.010) # 10 ms
-    rms = librosa.feature.rms(y=y_filtered, frame_length=2048, hop_length=hop_length)[0]
 
-    # Smooth the RMS envelope
-    win_length = int(0.050 / 0.010) # 50 ms
-    window = np.ones(win_length) / win_length
-    rms_smoothed = np.convolve(rms, window, mode='same')
+    # Calculate onset envelope using spectral flux
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr_analysis, hop_length=hop_length)
 
-    # 3. Peak-pick with minimum inter-peak distance (~60 ms) and adaptive threshold
-    min_dist_frames = int(0.060 / 0.010) # 60 ms
+    # Detect onsets with a minimum distance (e.g. ~60ms) and low threshold to catch unvoiced consonants
+    peaks = librosa.onset.onset_detect(
+        onset_envelope=onset_env,
+        sr=sr_analysis,
+        hop_length=hop_length,
+        wait=int(0.060 / 0.010),
+        pre_max=3,
+        post_max=3,
+        pre_avg=3,
+        post_avg=5,
+        delta=0.05,
+        units='frames'
+    )
 
-    # Adaptive threshold: rolling median
-    rolling_median = scipy.signal.medfilt(rms_smoothed, kernel_size=31) # ~300ms window
-    # peaks must be above rolling median + small epsilon
-    threshold = rolling_median + 0.01
-
-    peaks, _ = scipy.signal.find_peaks(rms_smoothed, distance=min_dist_frames, height=threshold)
-
-    # 4. Gate peaks by voicedness using torchcrepe
+    # 2. Get pitch and periodicity using torchcrepe
     # torchcrepe expects 16kHz audio, shape (1, samples)
     y_16k = librosa.resample(y, orig_sr=sr_analysis, target_sr=16000)
     audio_tensor = torch.from_numpy(y_16k).float().unsqueeze(0)
 
-    # Compute pitch and periodicity (confidence)
-    # Use full pitch range for speech
     fmin = 50
     fmax = 2000
-    hop_length_crepe = int(16000 * 0.010) # 10 ms hop for alignment with RMS
+    hop_length_crepe = int(16000 * 0.010) # 10 ms hop for alignment
 
     pitch, periodicity = torchcrepe.predict(
         audio_tensor,
@@ -289,35 +284,27 @@ def detect_syllables(vocals_wav: str):
     events = []
 
     # Normalize strength per track
-    max_rms = np.max(rms_smoothed) if len(rms_smoothed) > 0 else 1.0
+    max_strength = np.max(onset_env) if len(onset_env) > 0 else 1.0
 
     for peak in peaks:
-        # Align peak frame (22050Hz/10ms) to crepe frame (16000Hz/10ms). They should correspond 1:1 roughly.
+        # Align peak frame (22050Hz/10ms) to crepe frame (16000Hz/10ms)
         peak_time = peak * hop_length / sr_analysis
 
-        # crepe time array
         crepe_frame = int(peak_time / 0.010)
         crepe_frame = min(crepe_frame, len(periodicity) - 1)
 
-        if periodicity[crepe_frame] > 0.4: # Voicedness threshold
-            # 5. Backtrack to local energy-rise start
-            # Walk backward from peak until RMS drops below a fraction of the peak or starts rising again
-            backtrack_idx = peak
-            while backtrack_idx > 0 and rms_smoothed[backtrack_idx - 1] < rms_smoothed[backtrack_idx]:
-                backtrack_idx -= 1
-                if rms_smoothed[backtrack_idx] < 0.1 * rms_smoothed[peak]:
-                    break
+        onset_time = peak_time
+        strength = onset_env[peak] / max_strength
+        f0 = pitch[crepe_frame]
+        per = periodicity[crepe_frame]
 
-            onset_time = backtrack_idx * hop_length / sr_analysis
-            strength = rms_smoothed[peak] / max_rms
-            f0 = pitch[crepe_frame]
-
-            events.append({
-                "t": onset_time,
-                "strength": float(strength),
-                "f0": float(f0),
-                "dur": 0.1 # placeholder or calculate from voiced segment
-            })
+        events.append({
+            "t": float(onset_time),
+            "strength": float(strength),
+            "f0": float(f0),
+            "periodicity": float(per),
+            "dur": 0.1
+        })
 
     return events
 
@@ -381,7 +368,7 @@ def generate_hit(kind: str, sr=44100):
     return np.column_stack((hit, hit))
 
 
-def group_events(events: list, min_gap: float = 0.09):
+def group_events(events: list, min_gap: float = 0.06):
     """
     Merges onsets that land closer together than `min_gap` seconds into a
     single hit (keeping the strongest one of the group).
@@ -418,11 +405,11 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
 
     events = group_events(events)
 
-    # Pre-generate sample buckets based on overall f0 distribution
-    f0s = [e['f0'] for e in events if e['f0'] > 0]
-    if not f0s:
-        f0s = [200]
-    p33, p66 = np.percentile(f0s, [33, 66])
+    # Filter out unvoiced events for percentile calculation (to not skew the kick/snare thresholds)
+    voiced_f0s = [e['f0'] for e in events if e.get('periodicity', 1.0) > 0.2 and e['f0'] > 0]
+    if not voiced_f0s:
+        voiced_f0s = [200]
+    p33, p66 = np.percentile(voiced_f0s, [33, 66])
 
     samples = {
         'low': generate_hit('low', sr=sr),
@@ -453,9 +440,14 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
     for e in events:
         t_sec = e['t']
         idx = int(t_sec * sr)
+        per = e.get('periodicity', 1.0)
 
         # determine bucket
-        if e['f0'] < p33:
+        if per <= 0.2:
+            # Unvoiced consonants are explicitly mapped to hats
+            samp = samples['high']
+            note = 42 # Closed Hat
+        elif e['f0'] < p33:
             samp = samples['low']
             note = 36 # Kick
         elif e['f0'] < p66:
