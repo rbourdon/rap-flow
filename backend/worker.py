@@ -143,15 +143,20 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
             json.dump(events, f)
 
         mix_wav = os.path.join(outdir, "mix.wav")
-        _send_progress_update(job_id, "Synthesizing Beats", callback_url, hmac_secret)
         mix_out, midi_out, perc_only_out, inst_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
+
+        # Notify UI: Uploading results
+        if callback_url and hmac_secret:
+            print("Sending UPLOADING progress update")
+            body = json.dumps({"jobId": job_id, "stage": "UPLOADING"}).encode('utf-8')
+            signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+            headers = {'Content-Type': 'application/json', 'x-signature': signature}
+            requests.post(callback_url, data=body, headers=headers)
 
         mix_blob_url = ""
         events_blob_url = ""
         perc_blob_url = ""
         inst_blob_url = ""
-
-        _send_progress_update(job_id, "Saving Results", callback_url, hmac_secret)
 
         if token:
             print("Uploading results to Vercel Blob...")
