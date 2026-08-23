@@ -20,6 +20,29 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Database
+
+This project uses Prisma with a PostgreSQL (Neon) database. The schema lives in
+`prisma/schema.prisma` and its migrations in `prisma/migrations`.
+
+Set `DATABASE_URL` to your Postgres connection string, then apply the migrations
+so the required tables (`user`, `session`, `account`, `verification`, `job`)
+exist. **If migrations are not applied, `GET /` and other database-backed routes
+return a 500 error because the tables are missing.**
+
+```bash
+# Apply all pending migrations to the database referenced by DATABASE_URL
+npm run db:deploy
+```
+
+The `build` script also runs `db:deploy` automatically, so migrations are applied
+on deploy whenever `DATABASE_URL` is available (it is skipped with a warning when
+`DATABASE_URL` is not set). To create a new migration after editing the schema:
+
+```bash
+npx prisma migrate dev --name <migration-name>
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
