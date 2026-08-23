@@ -6,6 +6,24 @@ analysed for syllable onsets, and rendered into a percussion mix. The heavy
 lifting runs on [Modal](https://modal.com) (`worker.py`); `cli.py` runs the same
 pipeline locally.
 
+## Percussion synthesis
+
+Each detected syllable triggers a percussive hit. Two things shape how the
+result sounds:
+
+- **Drum kit sampled from the track.** When the separated drum stem yields
+  enough transients, one-shots are sliced from it and bucketed (by spectral
+  centroid) into low/mid/high, so the generated beat is built from the song's
+  own drum sounds. If the stem is too sparse to sample, the kit falls back to
+  synthesized hits (warm tuned kick/snare + noise-based hat) instead of the
+  original thin "click".
+- **Pitch matching.** Each hit is tuned to the vocal fundamental (`f0`) of the
+  syllable that triggered it, octave-folded into the drum's natural register,
+  so the percussion tracks the pitch of the flow. Sampled one-shots are
+  pitch-shifted (bounded to ±6 semitones to stay natural); synthesized hits are
+  generated at the target pitch.
+
+
 ## YouTube ingestion & the "HTTP Error 403: Forbidden" problem
 
 YouTube increasingly requires a **GVS proof-of-origin (PO) token** to download

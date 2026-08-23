@@ -134,7 +134,7 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
         pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy)
 
         _send_progress_update(job_id, "Separating Vocals", callback_url, hmac_secret)
-        vocals_wav, inst_wav = pipeline.separate_audio(input_wav, outdir)
+        vocals_wav, inst_wav, drums_wav = pipeline.separate_audio(input_wav, outdir)
 
         _send_progress_update(job_id, "Analyzing Syllables", callback_url, hmac_secret)
         events = pipeline.detect_syllables(vocals_wav)
@@ -143,7 +143,7 @@ def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str
             json.dump(events, f)
 
         mix_wav = os.path.join(outdir, "mix.wav")
-        mix_out, midi_out, perc_only_out, inst_only_out = pipeline.render_percussion(events, inst_wav, mix_wav)
+        mix_out, midi_out, perc_only_out, inst_only_out = pipeline.render_percussion(events, inst_wav, mix_wav, drums_wav=drums_wav)
 
         # Notify UI: Uploading results
         if callback_url and hmac_secret:

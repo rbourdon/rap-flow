@@ -16,7 +16,7 @@ def main():
     ingest_audio(args.input, input_wav, yt_cookies=os.environ.get("YT_COOKIES"), yt_proxy=os.environ.get("YT_PROXY"))
 
     print("Separating stems...")
-    vocals_wav, inst_wav = separate_audio(input_wav, args.outdir)
+    vocals_wav, inst_wav, drums_wav = separate_audio(input_wav, args.outdir)
 
     print("Detecting syllables...")
     events = detect_syllables(vocals_wav)
@@ -28,7 +28,7 @@ def main():
 
     print("Rendering percussion mix...")
     mix_wav = os.path.join(args.outdir, "mix.wav")
-    _, _, perc_only_wav, _ = render_percussion(events, inst_wav, mix_wav)
+    _, _, perc_only_wav, _ = render_percussion(events, inst_wav, mix_wav, drums_wav=drums_wav)
 
     print(f"Done. Outputs in {args.outdir}/")
     print(f"Percussion-only render (for verification): {perc_only_wav}")
