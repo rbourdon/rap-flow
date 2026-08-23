@@ -29,14 +29,39 @@ export async function POST(
 
     const data = JSON.parse(body);
 
-
-    if (data.status === 'PROCESSING') {
+    // Merge a per-stage update into the job's durable stageStates map. The
+    // staged workflow reports each stage transition (RUNNING/COMPLETED/REUSED)
+    // via `stageKey` + `stageState`; we keep the map so the UI can show
+    // granular progress and offer per-stage reprocessing.
+    async function mergeStageState(extra: Record<string, unknown> = {}) {
+      if (!data.stageKey) {
+        if (Object.keys(extra).length > 0) {
+          await prisma.job.update({ where: { id }, data: extra });
+        }
+        return;
+      }
+      const existing = await prisma.job.findUnique({
+        where: { id },
+        select: { stageStates: true },
+      });
+      const stageStates = {
+        ...((existing?.stageStates as Record<string, unknown>) ?? {}),
+        [data.stageKey]: {
+          state: data.stageState ?? data.status,
+          reused: data.reused ?? false,
+          updatedAt: new Date().toISOString(),
+        },
+      };
       await prisma.job.update({
         where: { id },
-        data: {
-          status: 'PROCESSING',
-          stage: data.stage,
-        }
+        data: { ...extra, stageStates },
+      });
+    }
+
+    if (data.status === 'PROCESSING') {
+      await mergeStageState({
+        status: 'PROCESSING',
+        stage: data.stage,
       });
       return NextResponse.json({ success: true });
     } else if (data.status === 'COMPLETED' && !data.resultUrl) {
@@ -53,24 +78,18 @@ export async function POST(
         }
       });
     } else if (data.status === 'COMPLETED') {
-      await prisma.job.update({
-        where: { id },
-        data: {
-          status: 'COMPLETED',
-          stage: data.stage,
-          resultBlobUrl: data.resultUrl,
-          eventsBlobUrl: data.eventsUrl,
-          percBlobUrl: data.percUrl,
-          instBlobUrl: data.instUrl,
-        }
+      await mergeStageState({
+        status: 'COMPLETED',
+        stage: data.stage,
+        resultBlobUrl: data.resultUrl,
+        eventsBlobUrl: data.eventsUrl,
+        percBlobUrl: data.percUrl,
+        instBlobUrl: data.instUrl,
       });
     } else if (data.status === 'FAILED') {
-      await prisma.job.update({
-        where: { id },
-        data: {
-          status: 'FAILED',
-          error: data.error,
-        }
+      await mergeStageState({
+        status: 'FAILED',
+        error: data.error,
       });
     }
 

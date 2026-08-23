@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation'
 import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
 import { RetryButton } from './RetryButton'
+import { ReprocessControls } from './ReprocessControls'
 import { ClientDate } from '@/components/ClientDate'
 import { JobStatusTracker } from './JobStatusTracker'
 
@@ -90,6 +91,10 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
             <a href={`/api/jobs/${job.id}/asset?type=mix`} download className="bg-green-500 text-white px-4 py-2 rounded font-medium hover:bg-green-600 transition">
               Download Audio
             </a>
+          </div>
+
+          <div className="mt-6 pt-6 border-t border-white/5">
+            <ReprocessControls jobId={job.id} />
           </div>
         </div>
       )}

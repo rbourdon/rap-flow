@@ -74,6 +74,11 @@ model Job {
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   status        String   @default("PENDING")
   stage         String?
+  // Per-stage durable state for the staged workflow, keyed by stage id
+  // (ingest/separate/detect/render/finalize). Each value records the stage's
+  // state (RUNNING/COMPLETED/REUSED/FAILED) and whether a cached artifact was
+  // reused, so the UI can show progress and offer per-stage reprocessing.
+  stageStates   Json?
   sourceType    String
   sourceUrl     String?
   inputBlobUrl  String?

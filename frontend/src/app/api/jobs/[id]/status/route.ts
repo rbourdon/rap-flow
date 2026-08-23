@@ -23,7 +23,8 @@ export async function GET(
       select: {
         userId: true,
         status: true,
-        stage: true
+        stage: true,
+        stageStates: true
       }
     });
 
@@ -35,7 +36,7 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    return NextResponse.json({ status: job.status, stage: job.stage });
+    return NextResponse.json({ status: job.status, stage: job.stage, stageStates: job.stageStates });
   } catch (error) {
     console.error('Job status endpoint error:', error);
     return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
