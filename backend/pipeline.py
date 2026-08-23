@@ -221,10 +221,13 @@ def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0)
     # Demucs standard sample rate is 44100 for htdemucs_ft
     sf.write(vocals_path, vocals, separator.samplerate)
     sf.write(instrumental_path, instrumental, separator.samplerate)
-    # Original (unducked) drums stem, kept around for diagnostics/comparison.
+    # Original (unducked) drums stem. Kept for diagnostics/comparison and,
+    # more importantly, reused downstream to sample real one-shots from the
+    # track so the generated percussion can be built from the song's own
+    # drum sounds rather than pure synthesis.
     sf.write(drums_path, drums, separator.samplerate)
 
-    return vocals_path, instrumental_path
+    return vocals_path, instrumental_path, drums_path
 
 
 import torchcrepe
@@ -329,43 +332,206 @@ def _shaped_noise(duration, sr, band=None):
     return noise
 
 
-def generate_hit(kind: str, sr=44100):
+def _to_stereo(mono):
+    """Duplicate a mono buffer into a (samples, 2) stereo buffer."""
+    return np.column_stack((mono, mono))
+
+
+def _normalize_peak(hit, target=1.0):
+    """Scale so the absolute peak equals `target`, leaving silence untouched."""
+    peak = np.max(np.abs(hit))
+    if peak > 0:
+        hit = hit / peak * target
+    return hit
+
+
+def _fold_to_range(freq, lo, hi):
+    """Octave-fold `freq` into [lo, hi] so a pitch stays in a drum's register.
+
+    Vocal fundamentals span a wide range; naively tuning a kick to a 400 Hz
+    syllable would make it a mid tom. Folding by octaves keeps the drum in
+    its natural register while still tracking the *pitch class* of the
+    syllable, which is what makes the hit feel "in tune" with the vocal.
     """
-    Synthesizes a percussive hit with a clear transient and a spectral
-    footprint distinct from the other hit types, instead of a single
-    decaying sine ("click"). Each hit blends a tonal component (for pitch
-    identity) with a shaped-noise component (for the broadband transient
-    real drums have), which is both more audible and more recognizable as
-    percussion when mixed against a busy instrumental.
+    if freq is None or freq <= 0:
+        return None
+    f = float(freq)
+    while f < lo:
+        f *= 2
+    while f > hi:
+        f /= 2
+    return f
+
+
+def generate_hit(kind: str, sr=44100, pitch=None):
     """
-    if kind == 'low':  # kick: pitched sine sweep + short sub thump
-        duration = 0.22
+    Synthesizes a percussive hit with a clear transient and a warm, tuned
+    body instead of a thin decaying sine ("click"). Each hit blends a tonal
+    component (for pitch identity) with a shaped-noise component (for the
+    broadband transient real drums have).
+
+    When `pitch` (a vocal fundamental in Hz) is provided, the tonal body is
+    tuned to that pitch, octave-folded into the drum's natural register, so
+    the generated hit matches the pitch of the syllable that triggered it.
+    """
+    if kind == 'low':  # kick: tuned sine sweep + short sub thump
+        duration = 0.24
         t = np.linspace(0, duration, int(sr * duration), False)
-        f_start, f_end = 150.0, 45.0
-        # exponential pitch sweep gives the classic kick "pitch drop"
-        freq = f_end + (f_start - f_end) * np.exp(-t * 18)
+        base = _fold_to_range(pitch, 40.0, 110.0) or 55.0
+        # Exponential pitch drop from a punchy attack down to the tuned base
+        # gives the classic kick "thump"; the tail settles on `base` so the
+        # kick carries the syllable's pitch.
+        f_start, f_end = base * 3.2, base
+        freq = f_end + (f_start - f_end) * np.exp(-t * 16)
         phase = 2 * np.pi * np.cumsum(freq) / sr
-        tone = np.sin(phase) * np.exp(-t * 14)
-        click = _shaped_noise(duration, sr, band=[800, 4000]) * np.exp(-t * 90)
-        hit = tone * 0.85 + click * 0.35
-    elif kind == 'mid':  # snare: mid tone + broadband noise crack
-        duration = 0.18
+        body = np.sin(phase) * np.exp(-t * 11)
+        sub = np.sin(2 * np.pi * base * t) * np.exp(-t * 8) * 0.6
+        click = _shaped_noise(duration, sr, band=[1200, 4500]) * np.exp(-t * 120)
+        hit = body * 0.9 + sub + click * 0.18
+    elif kind == 'mid':  # snare: tuned two-tone body + filtered noise crack
+        duration = 0.2
         t = np.linspace(0, duration, int(sr * duration), False)
-        tone = np.sin(2 * np.pi * 190 * t) * np.exp(-t * 35)
-        noise = _shaped_noise(duration, sr, band=[900, 6000]) * np.exp(-t * 22)
-        hit = tone * 0.5 + noise * 0.85
-    else:  # closed hat: short high-passed noise burst
+        base = _fold_to_range(pitch, 150.0, 300.0) or 190.0
+        # Slightly detuned pair thickens the body and keeps it from sounding
+        # like a pure sine beep.
+        body = (np.sin(2 * np.pi * base * t) + 0.7 * np.sin(2 * np.pi * base * 1.5 * t))
+        body *= np.exp(-t * 30)
+        noise = _shaped_noise(duration, sr, band=[1500, 7000]) * np.exp(-t * 18)
+        hit = body * 0.5 + noise * 0.8
+    else:  # closed hat: short high-passed noise burst, optional faint ring
         duration = 0.08
         t = np.linspace(0, duration, int(sr * duration), False)
         noise = _shaped_noise(duration, sr, band=[6000, min(16000, sr / 2 - 100)])
         hit = noise * np.exp(-t * 60)
+        ring = _fold_to_range(pitch, 3000.0, 8000.0)
+        if ring is not None:
+            hit = hit + 0.15 * np.sin(2 * np.pi * ring * t) * np.exp(-t * 90)
 
-    # Normalize peak to 1.0 so downstream gain staging is consistent across kinds
-    peak = np.max(np.abs(hit))
-    if peak > 0:
-        hit = hit / peak
+    hit = _normalize_peak(hit)
+    return _to_stereo(hit)
 
-    return np.column_stack((hit, hit))
+
+def _estimate_pitch(mono, sr, fmin=40.0, fmax=400.0):
+    """Best-effort dominant pitch (Hz) of a short sample, or None."""
+    if len(mono) < int(sr * 0.02):
+        return None
+    try:
+        f0 = librosa.yin(mono.astype(np.float64), fmin=fmin, fmax=fmax, sr=sr)
+        f0 = f0[np.isfinite(f0)]
+        f0 = f0[f0 > 0]
+        if len(f0) == 0:
+            return None
+        return float(np.median(f0))
+    except Exception:
+        return None
+
+
+def _repitch(sample_stereo, semitones, sr):
+    """Pitch-shift a stereo sample by `semitones`, preserving its length."""
+    if abs(semitones) < 0.1:
+        return sample_stereo
+    out = np.zeros_like(sample_stereo)
+    for ch in range(sample_stereo.shape[1]):
+        out[:, ch] = librosa.effects.pitch_shift(
+            sample_stereo[:, ch].astype(np.float64), sr=sr, n_steps=semitones
+        )
+    return out
+
+
+def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
+    """Sample real one-shots from the separated drum stem to build a kit.
+
+    Rather than always synthesizing hits, this detects transients in the
+    song's own drum stem, slices them into one-shots, and buckets them into
+    low/mid/high by spectral centroid. The generated percussion can then be
+    built from drum sounds that already belong to the track, which sits far
+    more naturally in the mix than pure synthesis.
+
+    Returns a dict like
+        { 'low': {'sample': (n,2), 'pitch': float|None}, ... }
+    for whichever buckets could be filled, or None if the stem does not yield
+    enough usable transients (caller should fall back to synthesis).
+    """
+    try:
+        y, file_sr = sf.read(drums_wav)
+    except Exception:
+        return None
+
+    mono = y.mean(axis=1) if y.ndim > 1 else y
+    if len(mono) < file_sr:  # need at least ~1s of material
+        return None
+
+    hop = 512
+    try:
+        onset_frames = librosa.onset.onset_detect(
+            y=mono, sr=file_sr, hop_length=hop, backtrack=True, wait=2, delta=0.05
+        )
+    except Exception:
+        return None
+
+    if len(onset_frames) < min_hits:
+        return None
+
+    onset_samples = librosa.frames_to_samples(onset_frames, hop_length=hop)
+    max_len = int(file_sr * 0.4)
+    min_len = int(file_sr * 0.03)
+
+    candidates = []
+    for i, start in enumerate(onset_samples):
+        nxt = onset_samples[i + 1] if i + 1 < len(onset_samples) else len(mono)
+        end = min(start + max_len, nxt, len(mono))
+        seg = mono[start:end]
+        if len(seg) < min_len:
+            continue
+        # Short fade-out so slices don't click when they are cut before decay.
+        fade_len = min(len(seg), int(file_sr * 0.01))
+        window = np.ones(len(seg))
+        window[-fade_len:] = np.linspace(1.0, 0.0, fade_len)
+        seg = seg * window
+        rms = float(np.sqrt(np.mean(seg ** 2)))
+        if rms <= 0:
+            continue
+        centroid = float(np.mean(librosa.feature.spectral_centroid(y=seg, sr=file_sr)))
+        candidates.append({"seg": seg, "centroid": centroid, "rms": rms})
+
+    if len(candidates) < min_hits:
+        return None
+
+    centroids = np.array([c["centroid"] for c in candidates])
+    lo_thr, hi_thr = np.percentile(centroids, [40, 70])
+
+    buckets = {"low": [], "mid": [], "high": []}
+    for c in candidates:
+        if c["centroid"] <= lo_thr:
+            buckets["low"].append(c)
+        elif c["centroid"] <= hi_thr:
+            buckets["mid"].append(c)
+        else:
+            buckets["high"].append(c)
+
+    pitch_ranges = {
+        "low": (40.0, 200.0),
+        "mid": (120.0, 500.0),
+        "high": (1000.0, 8000.0),
+    }
+
+    kit = {}
+    for kind, members in buckets.items():
+        if not members:
+            continue
+        # Pick the strongest (loudest) representative for a clean, punchy hit.
+        best = max(members, key=lambda m: m["rms"])
+        seg = best["seg"]
+        if file_sr != sr:
+            seg = librosa.resample(seg, orig_sr=file_sr, target_sr=sr)
+        seg = _normalize_peak(seg, target=0.9)
+        fmin, fmax = pitch_ranges[kind]
+        pitch = _estimate_pitch(seg, sr, fmin=fmin, fmax=fmax)
+        kit[kind] = {"sample": _to_stereo(seg), "pitch": pitch}
+
+    if not kit:
+        return None
+    return kit
 
 
 def group_events(events: list, min_gap: float = 0.06):
@@ -395,9 +561,15 @@ def group_events(events: list, min_gap: float = 0.06):
     return grouped
 
 
-def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
+def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str, drums_wav: str = None):
     """
     Renders percussion from events and mixes with the instrumental.
+
+    If `drums_wav` (the separated drum stem) is provided, real one-shots are
+    sampled from it to build the kit; otherwise the kit is synthesized. Each
+    hit is additionally tuned to the vocal fundamental (`f0`) of the syllable
+    that triggered it, so the percussion tracks the pitch of the flow rather
+    than firing a fixed-pitch click.
     """
     inst, sr = sf.read(instrumental_wav)
     if len(inst.shape) == 1:
@@ -411,11 +583,46 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
         voiced_f0s = [200]
     p33, p66 = np.percentile(voiced_f0s, [33, 66])
 
-    samples = {
+    # Prefer a kit sampled from the track's own drum stem; fall back to
+    # synthesized hits for any bucket the stem could not fill (or entirely,
+    # if no stem was provided / it yielded too few transients).
+    sampled_kit = build_drum_kit_from_stem(drums_wav, sr) if drums_wav else None
+
+    synth_samples = {
         'low': generate_hit('low', sr=sr),
         'mid': generate_hit('mid', sr=sr),
         'high': generate_hit('high', sr=sr),
     }
+
+    # Registers used to fold a syllable's f0 into a musically sensible target
+    # for each drum type when tuning the hit to the vocal pitch.
+    tune_ranges = {'low': (40.0, 110.0), 'mid': (150.0, 300.0), 'high': (3000.0, 8000.0)}
+
+    # Cache pitched variants keyed by (kind, rounded-semitone / rounded-pitch)
+    # so repeated pitches don't repeatedly pay for pitch shifting / synthesis.
+    variant_cache = {}
+
+    def get_sample(kind, target_f0):
+        target = _fold_to_range(target_f0, *tune_ranges[kind]) if target_f0 and target_f0 > 0 else None
+
+        if sampled_kit and kind in sampled_kit:
+            base = sampled_kit[kind]
+            base_pitch = base['pitch']
+            semitones = 0.0
+            if target is not None and base_pitch and base_pitch > 0:
+                # Bound the shift so sampled drums stay natural rather than
+                # being warped into obviously artificial territory.
+                semitones = float(np.clip(12.0 * np.log2(target / base_pitch), -6.0, 6.0))
+            key = (kind, 'S', round(semitones))
+            if key not in variant_cache:
+                variant_cache[key] = _repitch(base['sample'], round(semitones), sr)
+            return variant_cache[key]
+
+        # Synthesized fallback: (re)generate the hit tuned to the target pitch.
+        key = (kind, 'G', round(target) if target else 0)
+        if key not in variant_cache:
+            variant_cache[key] = generate_hit(kind, sr=sr, pitch=target) if target else synth_samples[kind]
+        return variant_cache[key]
 
     perc_track = np.zeros_like(inst)
     # Sidechain-style ducking envelope: 1.0 = no ducking, dips toward
@@ -441,21 +648,27 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str):
         t_sec = e['t']
         idx = int(t_sec * sr)
         per = e.get('periodicity', 1.0)
+        f0 = e.get('f0', 0.0)
 
         # determine bucket
         if per <= 0.2:
             # Unvoiced consonants are explicitly mapped to hats
-            samp = samples['high']
+            kind = 'high'
             note = 42 # Closed Hat
-        elif e['f0'] < p33:
-            samp = samples['low']
+        elif f0 < p33:
+            kind = 'low'
             note = 36 # Kick
-        elif e['f0'] < p66:
-            samp = samples['mid']
+        elif f0 < p66:
+            kind = 'mid'
             note = 38 # Snare
         else:
-            samp = samples['high']
+            kind = 'high'
             note = 42 # Closed Hat
+
+        # Tune the hit to the syllable's pitch (skip for unvoiced hats, which
+        # have no meaningful fundamental).
+        tune_f0 = f0 if per > 0.2 else None
+        samp = get_sample(kind, tune_f0)
 
         # Perceptual scaling, biased up from the original (0.6 exp, 0.8 max)
         # so hits are clearly audible rather than a subtle accent.

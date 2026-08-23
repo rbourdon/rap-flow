@@ -79,7 +79,12 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
         <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm">
           <h2 className="text-xl font-semibold mb-4">Result Mix</h2>
 
-          <WaveSurferPlayer audioUrl={`/api/jobs/${job.id}/asset?type=mix`} events={events} />
+          <WaveSurferPlayer
+            audioUrl={`/api/jobs/${job.id}/asset?type=mix`}
+            percUrl={job.percBlobUrl ? `/api/jobs/${job.id}/asset?type=perc` : undefined}
+            instUrl={job.instBlobUrl ? `/api/jobs/${job.id}/asset?type=inst` : undefined}
+            events={events}
+          />
 
           <div className="mt-6">
             <a href={`/api/jobs/${job.id}/asset?type=mix`} download className="bg-green-500 text-white px-4 py-2 rounded font-medium hover:bg-green-600 transition">
