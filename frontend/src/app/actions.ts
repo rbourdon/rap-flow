@@ -5,6 +5,20 @@ import { revalidatePath } from 'next/cache'
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 
+async function getAppUrl() {
+  const headersList = await headers();
+  const host = headersList.get('host') || 'localhost:3000';
+  const protocol = headersList.get('x-forwarded-proto') || 'http';
+
+  if (process.env.NEXT_PUBLIC_APP_URL) {
+    return process.env.NEXT_PUBLIC_APP_URL;
+  }
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`;
+  }
+  return `${protocol}://${host}`;
+}
+
 export async function createJobFromUrl(sourceUrl: string) {
   const session = await auth.api.getSession({
     headers: await headers()
@@ -23,8 +37,10 @@ export async function createJobFromUrl(sourceUrl: string) {
     }
   });
 
+  const appUrl = await getAppUrl();
+
   // Fire and forget to Modal worker
-  fetch(process.env.MODAL_WORKER_URL || 'http://localhost:3000/api/mock', {
+  fetch(process.env.MODAL_WORKER_URL || `${appUrl}/api/mock`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -32,7 +48,7 @@ export async function createJobFromUrl(sourceUrl: string) {
     body: JSON.stringify({
       jobId: job.id,
       sourceUrl: sourceUrl,
-      callbackUrl: `${process.env.NEXT_PUBLIC_APP_URL}/api/jobs/${job.id}/complete`,
+      callbackUrl: `${appUrl}/api/jobs/${job.id}/complete`,
       hmacSig: process.env.HMAC_SECRET || 'dummy-secret-for-dev',
       blobToken: process.env.BLOB_READ_WRITE_TOKEN
     })
@@ -60,7 +76,9 @@ export async function createJobFromBlob(blobUrl: string) {
     }
   });
 
-  fetch(process.env.MODAL_WORKER_URL || 'http://localhost:3000/api/mock', {
+  const appUrl = await getAppUrl();
+
+  fetch(process.env.MODAL_WORKER_URL || `${appUrl}/api/mock`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -68,7 +86,7 @@ export async function createJobFromBlob(blobUrl: string) {
     body: JSON.stringify({
       jobId: job.id,
       sourceUrl: blobUrl, // use blob url as source
-      callbackUrl: `${process.env.NEXT_PUBLIC_APP_URL}/api/jobs/${job.id}/complete`,
+      callbackUrl: `${appUrl}/api/jobs/${job.id}/complete`,
       hmacSig: process.env.HMAC_SECRET || 'dummy-secret-for-dev',
       blobToken: process.env.BLOB_READ_WRITE_TOKEN
     })
