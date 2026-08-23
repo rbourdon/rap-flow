@@ -6,6 +6,40 @@ analysed for syllable onsets, and rendered into a percussion mix. The heavy
 lifting runs on [Modal](https://modal.com) (`worker.py`); `cli.py` runs the same
 pipeline locally.
 
+## Staged durable workflow
+
+The pipeline is a short, linear DAG that is split into independent, cache-aware
+stages coordinated by a lightweight Modal-native orchestrator:
+
+```
+ingest -> separate -> detect -> render -> finalize
+```
+
+- **Per-stage workers.** Each stage is its own Modal function (`worker.py`) with
+  a resource profile suited to its work: `ingest` and `render` run on cheap CPU
+  containers, while `separate` (Demucs) and `detect` (torchcrepe) get a GPU.
+  Every stage has its own timeout and is retried independently.
+- **Durable artifacts + download reuse.** Every stage writes its outputs to a
+  persistent Modal Volume (`rap-flow-artifacts`, mounted at `/artifacts`) under a
+  key derived from the *content of its inputs* (see `workflow.py`). The ingest
+  key is the normalized source id (e.g. the bare YouTube video id), so a second
+  job on the same source — or any retry — **reuses the existing download instead
+  of re-downloading**. Stems are keyed by the input audio hash and the render by
+  the render parameters, so nothing stale is ever served.
+- **Retry / reprocess individual stages.** The orchestrator accepts a
+  `fromStage` argument: stages before it are near-free cache hits, while that
+  stage and everything after it are forced to recompute. This lets you, for
+  example, re-render with different ducking/quantization settings while reusing
+  the already-separated stems. Changing render parameters yields a fresh render
+  cache key, so a reprocess never returns a stale mix.
+- **Thin frontend.** The Next.js app only *triggers* runs (optionally at a
+  specific stage / with parameter overrides) via the `web_trigger` endpoint and
+  receives signed progress callbacks — it never owns the workflow state machine.
+
+The pure stage/caching logic lives in `workflow.py` (no Modal-specific code), so
+it is reused unchanged by both `worker.py` (each stage wrapped in a Modal
+function) and `cli.py` (run locally, in-process).
+
 ## Percussion synthesis
 
 Detected syllable onsets are turned into a drum pattern that locks to the
@@ -94,4 +128,14 @@ These are read from the environment (in Modal, set them as secrets on the
 ```bash
 pip install -r requirements.txt
 python cli.py "https://youtu.be/VIDEO_ID" --outdir output
+```
+
+Intermediate artifacts are cached under `<outdir>/artifacts` (override with
+`--artifacts`), so re-running the same source reuses the download and stems. To
+force recomputation from a given stage while reusing everything before it, pass
+`--from-stage` (one of `ingest`, `separate`, `detect`, `render`), e.g. re-render
+without re-downloading or re-separating:
+
+```bash
+python cli.py "https://youtu.be/VIDEO_ID" --outdir output --from-stage render
 ```
