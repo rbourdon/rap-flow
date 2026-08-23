@@ -8,20 +8,40 @@ pipeline locally.
 
 ## Percussion synthesis
 
-Each detected syllable triggers a percussive hit. Two things shape how the
-result sounds:
+Detected syllable onsets are turned into a drum pattern that locks to the
+track's own groove rather than following the vocal melody:
 
-- **Drum kit sampled from the track.** When the separated drum stem yields
-  enough transients, one-shots are sliced from it and bucketed (by spectral
-  centroid) into low/mid/high, so the generated beat is built from the song's
-  own drum sounds. If the stem is too sparse to sample, the kit falls back to
-  synthesized hits (warm tuned kick/snare + noise-based hat) instead of the
-  original thin "click".
-- **Pitch matching.** Each hit is tuned to the vocal fundamental (`f0`) of the
-  syllable that triggered it, octave-folded into the drum's natural register,
-  so the percussion tracks the pitch of the flow. Sampled one-shots are
-  pitch-shifted (bounded to ±6 semitones to stay natural); synthesized hits are
-  generated at the target pitch.
+- **Beat-tracked grid + soft quantization.** The instrumental stem is
+  beat-tracked (`librosa.beat.beat_track`) and a 16th-note grid is built by
+  interpolating between the actual beat times, so it tolerates tempo drift.
+  Each onset is soft-quantized `QUANTIZE_STRENGTH` of the way (default `0.65`)
+  toward the nearest 16th gridline (snapping fully within 15 ms), removing the
+  jitter that fought the on-grid instrumental. If beat tracking is degenerate
+  (< 8 beats) the render falls back to unquantized times.
+- **Metrical role assignment.** Roles come from the quantized metrical position,
+  not vocal pitch. After estimating the 4/4 downbeat phase, on-beat hits on
+  beats 1 & 3 become kicks (MIDI 36), on beats 2 & 4 snares (MIDI 38), and 8th
+  /16th subdivisions become closed hats (MIDI 42). Unvoiced events always map to
+  hats. Density is gated per bar (at most 4 kicks / 2 snares; weakest overflow
+  demoted to hats), and empty grid positions stay as rests.
+- **Fixed-pitch kit sampled from the track.** When the separated drum stem
+  yields enough transients, one-shots are sliced from it, scored by isolation
+  (a clean >250 ms decay) and loudness, and bucketed by spectral centroid; the
+  top few candidates per bucket are cycled at render time to avoid machine-gun
+  repetition. Otherwise the kit is synthesized. Either way the kit is tuned
+  **once** to the track's median voiced vocal f0 (octave-folded into each drum's
+  register). Any repitching uses resampling (varispeed), never a phase vocoder,
+  so drum transients stay crisp.
+- **Band-limited ducking.** Kick and snare hits (not hats) duck the
+  instrumental. The bed is split with a ~400 Hz Linkwitz-Riley crossover and
+  only the low band is ducked, so the mix doesn't pump. Each dip has a 5 ms
+  attack ramp and a linear release (default 80 ms) to a floor of `0.7`
+  (~ -3 dB), avoiding the zipper clicks and constant pumping of the old
+  full-band, instantaneous sidechain. Set `DUCK_BAND_LIMITED=0` for full-band
+  ducking with the same gentle envelope.
+- **MIDI export.** The `.mid` file carries a real tempo meta message from the
+  tracked BPM and uses proper `ticks_per_beat` math, so it imports on-grid into
+  a DAW with the 36/38/42 drum notes.
 
 
 ## YouTube ingestion & the "HTTP Error 403: Forbidden" problem
@@ -64,6 +84,10 @@ These are read from the environment (in Modal, set them as secrets on the
 | `YT_PLAYER_CLIENT` | Comma-separated override for the yt-dlp player clients (e.g. `tv,web_safari`). Leave unset to use yt-dlp's maintained defaults. |
 | `MAX_SOURCE_DURATION_SEC` | Maximum accepted source duration in seconds (default `900`). |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob token used to upload results. |
+| `QUANTIZE_STRENGTH` | How far each onset is pulled toward the nearest 16th gridline, 0-1 (default `0.65`). |
+| `DUCK_FLOOR` | Ducking floor gain applied under kick/snare hits (default `0.7`, ~ -3 dB). |
+| `DUCK_RELEASE_MS` | Ducking release time in milliseconds (default `80`). |
+| `DUCK_BAND_LIMITED` | Duck only the low band via a ~400 Hz crossover when truthy (default on); set `0`/`false` for full-band ducking. |
 
 ## Running locally
 
