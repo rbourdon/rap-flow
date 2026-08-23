@@ -23,24 +23,31 @@ This project uses [`next/font`](https://nextjs.org/docs/app/building-your-applic
 ## Database
 
 This project uses Prisma with a PostgreSQL (Neon) database. The schema lives in
-`prisma/schema.prisma` and its migrations in `prisma/migrations`.
+`prisma/schema.prisma`.
 
-Set `DATABASE_URL` to your Postgres connection string, then apply the migrations
-so the required tables (`user`, `session`, `account`, `verification`, `job`)
-exist. **If migrations are not applied, `GET /` and other database-backed routes
-return a 500 error because the tables are missing.**
+Set `DATABASE_URL` to your Postgres connection string, then sync the schema so the
+required tables (`user`, `session`, `account`, `verification`, `job`) exist. **If
+the schema is not synced, `GET /` and other database-backed routes return a 500
+error because the tables are missing.**
 
 ```bash
-# Apply all pending migrations to the database referenced by DATABASE_URL
+# Sync the Prisma schema to the database referenced by DATABASE_URL
 npm run db:deploy
 ```
 
-The `build` script also runs `db:deploy` automatically, so migrations are applied
-on deploy whenever `DATABASE_URL` is available (it is skipped with a warning when
-`DATABASE_URL` is not set). To create a new migration after editing the schema:
+`db:deploy` runs `prisma db push`, which reconciles the database with
+`schema.prisma` without requiring a migration history. This is intentional: the
+database may already contain tables (e.g. created by Better Auth), so
+`prisma migrate deploy` would fail with `P3005 "The database schema is not empty"`.
+`db push` instead creates only the missing tables/columns and is safe to re-run on
+every deploy.
+
+The `build` script runs `db:deploy` automatically, so the schema is synced on
+deploy whenever `DATABASE_URL` is available (it is skipped with a warning when
+`DATABASE_URL` is not set). After editing `schema.prisma`, apply the changes with:
 
 ```bash
-npx prisma migrate dev --name <migration-name>
+npx prisma db push
 ```
 
 ## Learn More

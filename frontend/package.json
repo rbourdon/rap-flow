@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "npx prisma generate && npm run db:deploy && next build",
-    "db:deploy": "node -e \"process.env.DATABASE_URL ? require('child_process').execSync('npx prisma migrate deploy', { stdio: 'inherit' }) : console.warn('Skipping prisma migrate deploy: DATABASE_URL is not set')\"",
+    "db:deploy": "node -e \"process.env.DATABASE_URL ? require('child_process').execSync('npx prisma db push', { stdio: 'inherit' }) : console.warn('Skipping prisma db push: DATABASE_URL is not set')\"",
     "start": "next start",
     "lint": "eslint"
   },
