@@ -30,9 +30,29 @@ image = modal.Image.debian_slim(python_version="3.12") \
         "yt-dlp", f"bgutil-ytdlp-pot-provider=={BGUTIL_VERSION}", "ffmpeg-python", "demucs", "librosa",
         "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
     ) \
-    .add_local_python_source("pipeline")
+    .add_local_python_source("pipeline", "workflow")
 
+# Demucs model weights, cached across runs.
 volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
+
+# Durable artifact store shared by every stage. Each stage writes its outputs
+# here under a content-derived key (see workflow.py), so a later stage - or a
+# re-run of the workflow - can reuse an existing download / stems / events
+# instead of recomputing them. This is the backbone of the durable workflow:
+# state survives container restarts and individual stage retries.
+artifacts = modal.Volume.from_name("rap-flow-artifacts", create_if_missing=True)
+
+ARTIFACTS_ROOT = "/artifacts"
+
+# Where each stage stores/reads durable artifacts inside the container.
+_ARTIFACT_MOUNT = {ARTIFACTS_ROOT: artifacts}
+# Stem separation + syllable detection also need the demucs/torch model cache.
+_MODEL_MOUNT = {
+    ARTIFACTS_ROOT: artifacts,
+    "/root/.cache/torch/hub/checkpoints": volume,
+}
+
+_SECRETS = [modal.Secret.from_name("rap-flow-secrets")]
 
 
 def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: str):
@@ -75,152 +95,204 @@ def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: st
     return res.json().get("url", "")
 
 
-
-def _send_progress_update(job_id: str, stage: str, callback_url: str, hmac_secret: str):
+def _post_callback(payload: dict, callback_url: str, hmac_secret: str, timeout: int = 10):
+    """Sign and POST a status/progress payload to the frontend webhook."""
     import requests
-    import json
-    import hmac
-    import hashlib
 
-    payload = {
+    if not (callback_url and hmac_secret):
+        return None
+
+    body = json.dumps(payload).encode("utf-8")
+    signature = hmac.new(hmac_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    headers = {"Content-Type": "application/json", "x-signature": signature}
+    try:
+        return requests.post(callback_url, data=body, headers=headers, timeout=timeout)
+    except Exception as e:  # progress updates are best-effort
+        print(f"Failed to POST callback ({payload.get('stageKey')}): {e}")
+        return None
+
+
+import workflow  # noqa: E402  (imported after helpers; part of the image sources)
+
+
+def _stage_start(job_id, stage, callback_url, hmac_secret):
+    _post_callback({
         "jobId": job_id,
         "status": "PROCESSING",
-        "stage": stage
-    }
-
-    body = json.dumps(payload).encode('utf-8')
-    signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
-
-    headers = {
-        'Content-Type': 'application/json',
-        'x-signature': signature
-    }
-
-    try:
-        requests.post(callback_url, data=body, headers=headers, timeout=5)
-    except Exception as e:
-        print(f"Failed to send progress update for stage {stage}: {e}")
+        "stage": workflow.STAGE_LABELS[stage],
+        "stageKey": stage,
+        "stageState": "RUNNING",
+    }, callback_url, hmac_secret, timeout=5)
 
 
-@app.function(
-    image=image,
-    volumes={"/root/.cache/torch/hub/checkpoints": volume},
-    gpu="T4",
-    timeout=600,
-    secrets=[modal.Secret.from_name("rap-flow-secrets")]
-)
-def process_job(job_id: str, input_url: str, callback_url: str, hmac_secret: str, blob_token: str = None):
-    import sys
-    sys.path.append("/root")
-    import pipeline
-    import requests
+def _stage_done(job_id, stage, reused, callback_url, hmac_secret):
+    _post_callback({
+        "jobId": job_id,
+        "status": "PROCESSING",
+        "stage": workflow.STAGE_LABELS[stage],
+        "stageKey": stage,
+        "stageState": "REUSED" if reused else "COMPLETED",
+        "reused": bool(reused),
+    }, callback_url, hmac_secret, timeout=5)
 
-    print(f"Starting job {job_id} for {input_url}")
-    outdir = f"/tmp/{job_id}"
-    os.makedirs(outdir, exist_ok=True)
 
-    # Try to get blob token from env if not passed explicitly (set up in modal secrets)
+# ---------------------------------------------------------------------------
+# Per-stage Modal functions.
+#
+# Each stage runs in its own container with a resource profile suited to its
+# work (only separation/detection need a GPU), has its own timeout, and is
+# retried independently. Every stage reloads the artifact volume before reading
+# and commits it after writing so downstream stages see its outputs.
+# ---------------------------------------------------------------------------
+
+@app.function(image=image, volumes=_ARTIFACT_MOUNT, timeout=600,
+              retries=2, secrets=_SECRETS)
+def stage_ingest(job_id: str, source_url: str, params: dict, force: bool,
+                 callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    artifacts.reload()
+    _stage_start(job_id, "ingest", callback_url, hmac_secret)
+    res = workflow.stage_ingest(
+        ARTIFACTS_ROOT, source_url, params, force=force,
+        yt_cookies=os.environ.get("YT_COOKIES"),
+        yt_proxy=os.environ.get("YT_PROXY"),
+    )
+    artifacts.commit()
+    _stage_done(job_id, "ingest", res.get("reused"), callback_url, hmac_secret)
+    return res
+
+
+@app.function(image=image, volumes=_MODEL_MOUNT, gpu="T4", timeout=900,
+              retries=1, secrets=_SECRETS)
+def stage_separate(job_id: str, source_url: str, params: dict, force: bool,
+                   callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    artifacts.reload()
+    _stage_start(job_id, "separate", callback_url, hmac_secret)
+    res = workflow.stage_separate(ARTIFACTS_ROOT, source_url, params, force=force)
+    artifacts.commit()
+    _stage_done(job_id, "separate", res.get("reused"), callback_url, hmac_secret)
+    return res
+
+
+@app.function(image=image, volumes=_MODEL_MOUNT, gpu="T4", timeout=600,
+              retries=1, secrets=_SECRETS)
+def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
+                 callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    artifacts.reload()
+    _stage_start(job_id, "detect", callback_url, hmac_secret)
+    res = workflow.stage_detect(ARTIFACTS_ROOT, source_url, params, force=force)
+    artifacts.commit()
+    _stage_done(job_id, "detect", res.get("reused"), callback_url, hmac_secret)
+    # Drop the (potentially large) events list from the return value; downstream
+    # stages re-read events.json from the volume.
+    res.pop("events", None)
+    return res
+
+
+@app.function(image=image, volumes=_ARTIFACT_MOUNT, timeout=600,
+              retries=1, secrets=_SECRETS)
+def stage_render(job_id: str, source_url: str, params: dict, force: bool,
+                 callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    artifacts.reload()
+    _stage_start(job_id, "render", callback_url, hmac_secret)
+    res = workflow.stage_render(ARTIFACTS_ROOT, source_url, params, force=force)
+    artifacts.commit()
+    _stage_done(job_id, "render", res.get("reused"), callback_url, hmac_secret)
+    return res
+
+
+@app.function(image=image, volumes=_ARTIFACT_MOUNT, timeout=600,
+              retries=2, secrets=_SECRETS)
+def stage_finalize(job_id: str, source_url: str, params: dict, force: bool,
+                   callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    """Upload the render outputs to Vercel Blob and notify the frontend."""
+    artifacts.reload()
+    _stage_start(job_id, "finalize", callback_url, hmac_secret)
+
+    out = workflow.resolve_render_outputs(ARTIFACTS_ROOT, source_url, params)
     token = blob_token or os.environ.get("BLOB_READ_WRITE_TOKEN")
 
-    # Get optional cookies
-    yt_cookies = os.environ.get("YT_COOKIES")
+    if token:
+        print("Uploading results to Vercel Blob...")
+        mix_url = _upload_to_blob(out["mix_wav"], f"mix_{job_id}.wav", token, "audio/wav")
+        events_url = _upload_to_blob(out["events_path"], f"events_{job_id}.json", token, "application/json")
+        perc_url = _upload_to_blob(out["perc_wav"], f"perc_{job_id}.wav", token, "audio/wav")
+        inst_url = _upload_to_blob(out["inst_wav"], f"inst_{job_id}.wav", token, "audio/wav")
+    else:
+        print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
+        mix_url = "https://dummy.blob.vercel-storage.com/mix.wav"
+        events_url = "https://dummy.blob.vercel-storage.com/events.json"
+        perc_url = "https://dummy.blob.vercel-storage.com/perc.wav"
+        inst_url = "https://dummy.blob.vercel-storage.com/inst.wav"
 
-    # Get optional residential proxy (e.g. Decodo) to route yt-dlp requests through
-    yt_proxy = os.environ.get("YT_PROXY")
+    _post_callback({
+        "jobId": job_id,
+        "status": "COMPLETED",
+        "stage": "COMPLETED",
+        "stageKey": "finalize",
+        "stageState": "COMPLETED",
+        "resultUrl": mix_url,
+        "eventsUrl": events_url,
+        "percUrl": perc_url,
+        "instUrl": inst_url,
+    }, callback_url, hmac_secret)
 
+    return {"mix_url": mix_url, "reused": False}
+
+
+# Modal function for each stage, keyed by stage name, in execution order.
+_STAGE_FUNCS = {
+    "ingest": stage_ingest,
+    "separate": stage_separate,
+    "detect": stage_detect,
+    "render": stage_render,
+    "finalize": stage_finalize,
+}
+
+
+def _classify_error(err_msg: str) -> str:
+    if not (err_msg.startswith("AUTH_REQUIRED") or
+            err_msg.startswith("VIDEO_UNAVAILABLE") or
+            err_msg.startswith("UNSUPPORTED_SOURCE") or
+            err_msg.startswith("INGEST_FAILED") or
+            err_msg.startswith("MISSING_ARTIFACT") or
+            err_msg.startswith("UPLOAD_FAILED")):
+        err_msg = f"INGEST_FAILED: {err_msg}"
+    return err_msg
+
+
+@app.function(image=image, timeout=3600, secrets=_SECRETS)
+def run_workflow(job_id: str, source_url: str, callback_url: str, hmac_secret: str,
+                 blob_token: str = None, from_stage: str = None, params: dict = None):
+    """Thin orchestrator: chain the per-stage functions in order.
+
+    Caching in each stage means stages before ``from_stage`` are near-free
+    (they just verify their cached artifact exists), while ``from_stage`` and
+    everything after it are forced to recompute. ``from_stage=None`` runs a
+    normal job that reuses whatever artifacts already exist (e.g. a previously
+    downloaded source).
+    """
+    params = params or {}
+    start = workflow.STAGE_INDEX[from_stage] if from_stage else len(workflow.STAGES)
+
+    print(f"Starting workflow for job {job_id} ({source_url}), from_stage={from_stage}")
+
+    current_stage = "ingest"
     try:
-        _send_progress_update(job_id, "Downloading Audio", callback_url, hmac_secret)
-        input_wav = os.path.join(outdir, "input.wav")
-        pipeline.ingest_audio(input_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy)
-
-        _send_progress_update(job_id, "Separating Vocals", callback_url, hmac_secret)
-        vocals_wav, inst_wav, drums_wav = pipeline.separate_audio(input_wav, outdir)
-
-        _send_progress_update(job_id, "Analyzing Syllables", callback_url, hmac_secret)
-        events = pipeline.detect_syllables(vocals_wav)
-        events_path = os.path.join(outdir, "events.json")
-        with open(events_path, "w") as f:
-            json.dump(events, f)
-
-        mix_wav = os.path.join(outdir, "mix.wav")
-        mix_out, midi_out, perc_only_out, inst_only_out = pipeline.render_percussion(events, inst_wav, mix_wav, drums_wav=drums_wav)
-
-        # Notify UI: Uploading results
-        if callback_url and hmac_secret:
-            print("Sending UPLOADING progress update")
-            body = json.dumps({"jobId": job_id, "stage": "UPLOADING"}).encode('utf-8')
-            signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
-            headers = {'Content-Type': 'application/json', 'x-signature': signature}
-            requests.post(callback_url, data=body, headers=headers)
-
-        mix_blob_url = ""
-        events_blob_url = ""
-        perc_blob_url = ""
-        inst_blob_url = ""
-
-        if token:
-            print("Uploading results to Vercel Blob...")
-
-            mix_blob_url = _upload_to_blob(
-                mix_out, f"mix_{job_id}.wav", token, "audio/wav"
-            )
-            events_blob_url = _upload_to_blob(
-                events_path, f"events_{job_id}.json", token, "application/json"
-            )
-            perc_blob_url = _upload_to_blob(
-                perc_only_out, f"perc_{job_id}.wav", token, "audio/wav"
-            )
-            inst_blob_url = _upload_to_blob(
-                inst_only_out, f"inst_{job_id}.wav", token, "audio/wav"
-            )
-
-        else:
-            print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
-            mix_blob_url = "https://dummy.blob.vercel-storage.com/mix.wav"
-            events_blob_url = "https://dummy.blob.vercel-storage.com/events.json"
-            perc_blob_url = "https://dummy.blob.vercel-storage.com/perc.wav"
-            inst_blob_url = "https://dummy.blob.vercel-storage.com/inst.wav"
-
-        payload = {
-            "jobId": job_id,
-            "status": "COMPLETED",
-            "stage": "COMPLETED",
-            "resultUrl": mix_blob_url,
-            "eventsUrl": events_blob_url,
-            "percUrl": perc_blob_url,
-            "instUrl": inst_blob_url,
-            "events": events
-        }
-
+        for i, stage in enumerate(workflow.STAGES):
+            current_stage = stage
+            force = i >= start
+            fn = _STAGE_FUNCS[stage]
+            fn.remote(job_id, source_url, params, force,
+                      callback_url, hmac_secret, blob_token)
     except Exception as e:
-        err_msg = str(e)
-        print(f"Error in job {job_id}: {err_msg}")
-
-        # If it's already classified, use it. Otherwise, assume ingest or general failure if it's from pipeline
-        if not (err_msg.startswith("AUTH_REQUIRED") or
-                err_msg.startswith("VIDEO_UNAVAILABLE") or
-                err_msg.startswith("UNSUPPORTED_SOURCE") or
-                err_msg.startswith("INGEST_FAILED") or
-                err_msg.startswith("UPLOAD_FAILED")):
-            err_msg = f"INGEST_FAILED: {err_msg}"
-
-        payload = {
+        err_msg = _classify_error(str(e))
+        print(f"Error in job {job_id} at stage {current_stage}: {err_msg}")
+        _post_callback({
             "jobId": job_id,
             "status": "FAILED",
-            "error": err_msg
-        }
-
-    body = json.dumps(payload).encode('utf-8')
-    signature = hmac.new(hmac_secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
-
-    headers = {
-        'Content-Type': 'application/json',
-        'x-signature': signature
-    }
-
-    print(f"Calling webhook: {callback_url}")
-    resp = requests.post(callback_url, data=body, headers=headers)
-    print(f"Webhook response: {resp.status_code}")
+            "stageKey": current_stage,
+            "error": err_msg,
+        }, callback_url, hmac_secret)
 
 
 @app.function(image=image)
@@ -231,9 +303,18 @@ def web_trigger(data: Dict[str, Any]):
     callback_url = data.get("callbackUrl")
     hmac_secret = data.get("hmacSig")
     blob_token = data.get("blobToken")
+    # Optional: start (force) at a specific stage and/or override render params.
+    # This is how the frontend reprocesses an individual stage while reusing the
+    # existing download/stems.
+    from_stage = data.get("fromStage")
+    params = data.get("params") or {}
 
     if not all([job_id, source_url, callback_url, hmac_secret]):
         return {"error": "Missing parameters", "status": 400}
 
-    process_job.spawn(job_id, source_url, callback_url, hmac_secret, blob_token)
+    if from_stage is not None and from_stage not in workflow.STAGE_INDEX:
+        return {"error": f"Invalid fromStage '{from_stage}'", "status": 400}
+
+    run_workflow.spawn(job_id, source_url, callback_url, hmac_secret,
+                       blob_token, from_stage, params)
     return {"status": "started", "jobId": job_id}
