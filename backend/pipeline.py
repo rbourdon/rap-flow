@@ -2,6 +2,8 @@ import os
 import subprocess
 import tempfile
 import urllib.parse
+import logging
+from fractions import Fraction
 from pathlib import Path
 
 # Need numpy and others for later, just stubbing part 1
@@ -11,6 +13,9 @@ import librosa
 import soundfile as sf
 import yt_dlp
 import demucs.api
+
+
+logger = logging.getLogger(__name__)
 
 
 class IngestError(Exception):
@@ -237,6 +242,12 @@ def detect_syllables(vocals_wav: str):
     """
     Detects syllable events on the vocal stem using spectral onset detection.
     Returns a list of dicts: { "t": float, "strength": float, "f0": float, "periodicity": float, "dur": float }
+
+    Demucs vocal stems carry breaths, sibilance and separation artifacts that
+    the raw spectral-flux detector happily fires on. Two gates prune those:
+    an RMS gate discards onsets whose local vocal energy is well below the
+    track's typical voiced level (breaths/artifacts sit in near-silence), and
+    a strength gate discards the weakest normalized onsets.
     """
     # Load audio as mono, 22050 Hz for analysis
     sr_analysis = 22050
@@ -284,6 +295,20 @@ def detect_syllables(vocals_wav: str):
     pitch = pitch.squeeze().numpy()
     periodicity = periodicity.squeeze().numpy()
 
+    # Per-frame vocal RMS (10 ms hop, aligned to the onset frames) used to
+    # gate out low-energy false onsets. The reference level is the median RMS
+    # over voiced regions (periodicity > 0.2), i.e. where the rapper is
+    # actually singing, so breaths and separation hiss fall well below it.
+    rms = librosa.feature.rms(
+        y=y, frame_length=2 * hop_length, hop_length=hop_length
+    )[0]
+    voiced_mask = (periodicity > 0.2)[:len(rms)] if len(periodicity) else np.zeros(len(rms), bool)
+    voiced_rms = rms[:len(voiced_mask)][voiced_mask]
+    median_voiced_rms = float(np.median(voiced_rms)) if len(voiced_rms) else 0.0
+    rms_gate = 0.2 * median_voiced_rms
+    # Window of +/-25 ms around an onset, in 10 ms frames.
+    rms_half_win = 2
+
     events = []
 
     # Normalize strength per track
@@ -300,6 +325,19 @@ def detect_syllables(vocals_wav: str):
         strength = onset_env[peak] / max_strength
         f0 = pitch[crepe_frame]
         per = periodicity[crepe_frame]
+
+        # Strength gate: drop the weakest normalized onsets.
+        if strength < 0.1:
+            continue
+
+        # RMS gate: drop onsets sitting in near-silence relative to the voiced
+        # level (breaths, sibilance, Demucs artifacts).
+        if rms_gate > 0:
+            lo = max(0, peak - rms_half_win)
+            hi = min(len(rms), peak + rms_half_win + 1)
+            local_rms = float(np.mean(rms[lo:hi])) if hi > lo else 0.0
+            if local_rms < rms_gate:
+                continue
 
         events.append({
             "t": float(onset_time),
@@ -370,9 +408,10 @@ def generate_hit(kind: str, sr=44100, pitch=None):
     component (for pitch identity) with a shaped-noise component (for the
     broadband transient real drums have).
 
-    When `pitch` (a vocal fundamental in Hz) is provided, the tonal body is
-    tuned to that pitch, octave-folded into the drum's natural register, so
-    the generated hit matches the pitch of the syllable that triggered it.
+    When `pitch` (the track's median voiced vocal fundamental, in Hz) is
+    provided, the tonal body is tuned to it, octave-folded into the drum's
+    natural register, so the synthesized kit piece is tuned once to the track
+    rather than retuned per hit.
     """
     if kind == 'low':  # kick: tuned sine sweep + short sub thump
         duration = 0.24
@@ -426,19 +465,41 @@ def _estimate_pitch(mono, sr, fmin=40.0, fmax=400.0):
         return None
 
 
-def _repitch(sample_stereo, semitones, sr):
-    """Pitch-shift a stereo sample by `semitones`, preserving its length."""
-    if abs(semitones) < 0.1:
+def _varispeed_repitch(sample_stereo, source_pitch, target_pitch):
+    """Repitch a stereo one-shot by *resampling* (varispeed), not phase vocoder.
+
+    Playing a sample back faster raises its pitch and shortens it, the way a
+    hardware sampler's "varispeed" tuning works. This preserves the drum's
+    transient shape (a phase vocoder / `pitch_shift` smears it into a soft,
+    unnatural blob), which matters far more for percussion than keeping the
+    original length. The tuning happens once per kit piece, so the small
+    change in decay length is inaudible.
+
+    Returns the sample unchanged when either pitch is unknown or the ratio is
+    within ~2%. The ratio is clamped to +/-1 octave so a bad pitch estimate
+    can't warp a drum into obviously artificial territory.
+    """
+    if (source_pitch is None or source_pitch <= 0 or
+            target_pitch is None or target_pitch <= 0):
         return sample_stereo
-    out = np.zeros_like(sample_stereo)
-    for ch in range(sample_stereo.shape[1]):
-        out[:, ch] = librosa.effects.pitch_shift(
-            sample_stereo[:, ch].astype(np.float64), sr=sr, n_steps=semitones
-        )
-    return out
+    ratio = float(target_pitch) / float(source_pitch)
+    ratio = float(np.clip(ratio, 0.5, 2.0))
+    if abs(ratio - 1.0) < 0.02:
+        return sample_stereo
+    # To raise pitch by `ratio` we speed the sample up by `ratio`, i.e. output
+    # fewer samples: len_out = len_in / ratio. resample_poly(x, up, down)
+    # scales length by up/down, so up/down = 1/ratio.
+    frac = Fraction(1.0 / ratio).limit_denominator(200)
+    up, down = frac.numerator, frac.denominator
+    if up <= 0 or down <= 0:
+        return sample_stereo
+    out = [scipy.signal.resample_poly(sample_stereo[:, ch], up, down)
+           for ch in range(sample_stereo.shape[1])]
+    return np.column_stack(out)
 
 
-def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
+def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6,
+                             candidates_per_bucket: int = 3):
     """Sample real one-shots from the separated drum stem to build a kit.
 
     Rather than always synthesizing hits, this detects transients in the
@@ -447,8 +508,15 @@ def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
     built from drum sounds that already belong to the track, which sits far
     more naturally in the mix than pure synthesis.
 
+    Slices are scored by isolation as well as loudness: an onset with a large
+    gap (> 250 ms) to the next onset decays cleanly with little bleed from an
+    overlapping kick/hat, so it makes a better one-shot. Up to
+    `candidates_per_bucket` slices are kept per bucket (ranked by
+    ``rms * isolation_bonus``) so the render can cycle through them and avoid
+    machine-gun repetition of a single identical hit.
+
     Returns a dict like
-        { 'low': {'sample': (n,2), 'pitch': float|None}, ... }
+        { 'low': [{'sample': (n,2), 'pitch': float|None}, ...], ... }
     for whichever buckets could be filled, or None if the stem does not yield
     enough usable transients (caller should fall back to synthesis).
     """
@@ -475,10 +543,12 @@ def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
     onset_samples = librosa.frames_to_samples(onset_frames, hop_length=hop)
     max_len = int(file_sr * 0.4)
     min_len = int(file_sr * 0.03)
+    isolation_gap = int(file_sr * 0.25)  # 250 ms of clean decay
 
     candidates = []
     for i, start in enumerate(onset_samples):
         nxt = onset_samples[i + 1] if i + 1 < len(onset_samples) else len(mono)
+        gap = nxt - start
         end = min(start + max_len, nxt, len(mono))
         seg = mono[start:end]
         if len(seg) < min_len:
@@ -492,7 +562,10 @@ def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
         if rms <= 0:
             continue
         centroid = float(np.mean(librosa.feature.spectral_centroid(y=seg, sr=file_sr)))
-        candidates.append({"seg": seg, "centroid": centroid, "rms": rms})
+        # Well-isolated slices decay without an overlapping hit muddying them.
+        isolation_bonus = 1.5 if gap >= isolation_gap else 1.0
+        score = rms * isolation_bonus
+        candidates.append({"seg": seg, "centroid": centroid, "rms": rms, "score": score})
 
     if len(candidates) < min_hits:
         return None
@@ -519,15 +592,20 @@ def build_drum_kit_from_stem(drums_wav: str, sr: int, min_hits: int = 6):
     for kind, members in buckets.items():
         if not members:
             continue
-        # Pick the strongest (loudest) representative for a clean, punchy hit.
-        best = max(members, key=lambda m: m["rms"])
-        seg = best["seg"]
-        if file_sr != sr:
-            seg = librosa.resample(seg, orig_sr=file_sr, target_sr=sr)
-        seg = _normalize_peak(seg, target=0.9)
+        # Keep the top-scored representatives (isolation-weighted loudness) so
+        # the render can round-robin through them instead of repeating one.
+        members = sorted(members, key=lambda m: m["score"], reverse=True)
         fmin, fmax = pitch_ranges[kind]
-        pitch = _estimate_pitch(seg, sr, fmin=fmin, fmax=fmax)
-        kit[kind] = {"sample": _to_stereo(seg), "pitch": pitch}
+        variants = []
+        for member in members[:candidates_per_bucket]:
+            seg = member["seg"]
+            if file_sr != sr:
+                seg = librosa.resample(seg, orig_sr=file_sr, target_sr=sr)
+            seg = _normalize_peak(seg, target=0.9)
+            pitch = _estimate_pitch(seg, sr, fmin=fmin, fmax=fmax)
+            variants.append({"sample": _to_stereo(seg), "pitch": pitch})
+        if variants:
+            kit[kind] = variants
 
     if not kit:
         return None
@@ -561,141 +639,352 @@ def group_events(events: list, min_gap: float = 0.06):
     return grouped
 
 
-def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str, drums_wav: str = None):
+def track_beats(instrumental_wav: str):
+    """Track beats on the **instrumental** stem.
+
+    Returns ``(beat_times, tempo)`` where ``beat_times`` is a 1-D array of beat
+    times in seconds and ``tempo`` is the estimated BPM. Beat tracking is run
+    on the instrumental (not the vocals) because the syllable-derived
+    percussion should lock to the musical grid of the backing track, not to
+    the rapper's phrasing.
+
+    The caller is expected to build its grid from the returned beat *times*
+    (which follow tempo drift) rather than assuming a single constant BPM.
+    """
+    try:
+        y, sr = librosa.load(instrumental_wav, sr=22050, mono=True)
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr, units='time')
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Beat tracking failed on %s: %s", instrumental_wav, exc)
+        return np.asarray([], dtype=float), 0.0
+    tempo = float(np.atleast_1d(tempo)[0]) if np.size(tempo) else 0.0
+    return np.asarray(beats, dtype=float), tempo
+
+
+def _build_sixteenth_grid(beat_times):
+    """Build a 16th-note grid by interpolating between consecutive beats.
+
+    Returns parallel arrays ``(grid_times, grid_beat_index, grid_subdivision)``
+    where ``grid_subdivision`` is 0-3 (0 = on the beat, 1-3 = the intervening
+    16th notes). Interpolating between the *actual* beat times keeps the grid
+    aligned even when the tempo drifts, which a fixed BPM grid would not.
+    """
+    times, beat_idx, sub_idx = [], [], []
+    for i in range(len(beat_times) - 1):
+        b0, b1 = beat_times[i], beat_times[i + 1]
+        for s in range(4):
+            times.append(b0 + (b1 - b0) * s / 4.0)
+            beat_idx.append(i)
+            sub_idx.append(s)
+    # Include the final beat itself as an on-beat gridline.
+    times.append(beat_times[-1])
+    beat_idx.append(len(beat_times) - 1)
+    sub_idx.append(0)
+    return np.asarray(times), np.asarray(beat_idx), np.asarray(sub_idx)
+
+
+def _estimate_downbeat_offset(beat_times, instrumental_wav):
+    """Estimate the 4/4 downbeat phase (beat-index offset 0-3).
+
+    Chooses the offset whose beats 1 and 3 (the strong beats of a 4/4 bar)
+    capture the most onset energy in the instrumental, so kicks land where the
+    track's own accents already fall.
+    """
+    if len(beat_times) < 4:
+        return 0
+    try:
+        y, sr = librosa.load(instrumental_wav, sr=22050, mono=True)
+        hop = 512
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+        env_times = librosa.frames_to_time(
+            np.arange(len(onset_env)), sr=sr, hop_length=hop
+        )
+    except Exception:
+        return 0
+    beat_strengths = np.interp(beat_times, env_times, onset_env,
+                               left=0.0, right=0.0)
+    best_offset, best_energy = 0, -1.0
+    for offset in range(4):
+        # Beats 1 and 3 are bar positions 0 and 2, i.e. even beats relative
+        # to the offset.
+        mask = ((np.arange(len(beat_times)) - offset) % 2) == 0
+        energy = float(np.sum(beat_strengths[mask]))
+        if energy > best_energy:
+            best_energy, best_offset = energy, offset
+    return best_offset
+
+
+# Metrical role -> (kit bucket, General MIDI note).
+_ROLE_KICK = ("low", 36)
+_ROLE_SNARE = ("mid", 38)
+_ROLE_HAT = ("high", 42)
+
+
+def _quantize_and_assign_roles(events, grid, offset, quantize_strength):
+    """Quantize events to the 16th grid and assign metrical drum roles.
+
+    ``grid`` is ``(grid_times, grid_beat_index, grid_subdivision)`` or None to
+    disable quantization (degenerate beat tracking). Returns a time-sorted list
+    of assignment dicts: ``{t, strength, kind, note}`` where ``kind`` is the kit
+    bucket (low/mid/high) and ``note`` the GM drum note (36/38/42).
+
+    Roles come from the *quantized metrical position*, not from pitch:
+      - on-beat, bar beats 1 & 3 -> kick
+      - on-beat, bar beats 2 & 4 -> snare
+      - 8th/16th offbeats         -> hat
+      - unvoiced events           -> hat (always)
+    Density is gated per bar (<=4 kicks, <=2 snares; weakest overflow demoted
+    to hats) and empty grid positions are left as rests.
+    """
+    if grid is None:
+        # Fallback: keep raw times, alternate kick/snare on voiced events and
+        # route unvoiced ones to hats. Musically crude, but only reached when
+        # beat tracking is unreliable.
+        assignments = []
+        voiced_count = 0
+        for e in sorted(events, key=lambda x: x['t']):
+            per = e.get('periodicity', 1.0)
+            if per <= 0.2:
+                kind, note = _ROLE_HAT
+            else:
+                kind, note = _ROLE_KICK if voiced_count % 2 == 0 else _ROLE_SNARE
+                voiced_count += 1
+            assignments.append({'t': float(e['t']), 'strength': float(e['strength']),
+                                'kind': kind, 'note': note})
+        return assignments
+
+    grid_times, grid_beat, grid_sub = grid
+
+    # Snap each event to its nearest gridline, deduping collisions (keep the
+    # stronger of any two events that land on the same 16th position).
+    slots = {}
+    for e in events:
+        t = float(e['t'])
+        k = int(np.argmin(np.abs(grid_times - t)))
+        gt = float(grid_times[k])
+        dt = gt - t
+        if abs(dt) <= 0.015:  # within 15 ms -> snap fully
+            qt = gt
+        else:
+            qt = t + quantize_strength * dt
+        assign = {
+            't': qt,
+            'strength': float(e['strength']),
+            'periodicity': float(e.get('periodicity', 1.0)),
+            'beat_index': int(grid_beat[k]),
+            'sub': int(grid_sub[k]),
+        }
+        prev = slots.get(k)
+        if prev is None or assign['strength'] > prev['strength']:
+            slots[k] = assign
+
+    ordered = sorted(slots.values(), key=lambda a: a['t'])
+
+    for a in ordered:
+        if a['periodicity'] <= 0.2:
+            a['kind'], a['note'] = _ROLE_HAT
+        elif a['sub'] == 0:
+            bar_pos = (a['beat_index'] - offset) % 4  # 0..3 -> beats 1..4
+            a['kind'], a['note'] = _ROLE_KICK if bar_pos in (0, 2) else _ROLE_SNARE
+        else:
+            a['kind'], a['note'] = _ROLE_HAT
+
+    _apply_density_gating(ordered, offset)
+    return ordered
+
+
+def _apply_density_gating(assignments, offset):
+    """Cap kicks/snares per 4/4 bar, demoting weakest overflow to hats."""
+    bars = {}
+    for a in assignments:
+        bar = (a['beat_index'] - offset) // 4
+        bars.setdefault(bar, []).append(a)
+
+    for items in bars.values():
+        kicks = [a for a in items if a['kind'] == _ROLE_KICK[0]]
+        snares = [a for a in items if a['kind'] == _ROLE_SNARE[0]]
+        for a in sorted(kicks, key=lambda x: x['strength'])[:max(0, len(kicks) - 4)]:
+            a['kind'], a['note'] = _ROLE_HAT
+        for a in sorted(snares, key=lambda x: x['strength'])[:max(0, len(snares) - 2)]:
+            a['kind'], a['note'] = _ROLE_HAT
+
+
+def _tune_kit(sampled_kit, sr, median_f0):
+    """Tune the whole kit ONCE to the track's median voiced vocal pitch.
+
+    Kick/snare/hat are each fixed-pitch for the track: the median voiced vocal
+    f0 is octave-folded into each drum's register and the kit piece is repitched
+    a single time (by resampling for sampled one-shots, or generated at the
+    target pitch for the synthesized fallback). Returns ``{kind: [sample, ...]}``
+    with up to three variants per bucket for round-robin playback.
+    """
+    tune_ranges = {'low': (40.0, 110.0), 'mid': (150.0, 300.0), 'high': (3000.0, 8000.0)}
+    kit = {}
+    for kind in ('low', 'mid', 'high'):
+        target = (_fold_to_range(median_f0, *tune_ranges[kind])
+                  if median_f0 and median_f0 > 0 else None)
+        variants = []
+        if sampled_kit and kind in sampled_kit:
+            for v in sampled_kit[kind]:
+                variants.append(_varispeed_repitch(v['sample'], v['pitch'], target))
+        else:
+            variants.append(generate_hit(kind, sr=sr, pitch=target))
+        kit[kind] = variants
+    return kit
+
+
+def _apply_duck(inst, env, sr, band_limited):
+    """Apply a ducking gain envelope, optionally only to the low band.
+
+    Band-limited ducking splits the instrumental with a ~400 Hz Linkwitz-Riley
+    style crossover (4th-order Butterworth low band, complementary high band so
+    the two sum back to the original) and ducks only the lows, where the kick
+    and snare compete. This keeps hats, vocals-in-the-bed and cymbals from
+    pumping. Full-band ducking is available as a fallback.
+    """
+    if not band_limited:
+        return inst * env[:, np.newaxis]
+    sos = scipy.signal.butter(4, 400.0, btype='low', fs=sr, output='sos')
+    low = np.empty_like(inst)
+    for ch in range(inst.shape[1]):
+        low[:, ch] = scipy.signal.sosfiltfilt(sos, inst[:, ch])
+    high = inst - low
+    return low * env[:, np.newaxis] + high
+
+
+def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str,
+                      drums_wav: str = None, quantize_strength: float = None,
+                      duck_floor: float = None, duck_release_ms: float = None,
+                      duck_band_limited: bool = None):
     """
     Renders percussion from events and mixes with the instrumental.
 
-    If `drums_wav` (the separated drum stem) is provided, real one-shots are
-    sampled from it to build the kit; otherwise the kit is synthesized. Each
-    hit is additionally tuned to the vocal fundamental (`f0`) of the syllable
-    that triggered it, so the percussion tracks the pitch of the flow rather
-    than firing a fixed-pitch click.
+    The rhythm is locked to a beat-tracked 16th-note grid (built from the
+    instrumental) via soft quantization, and drum roles are assigned by
+    metrical position rather than vocal pitch: kicks on beats 1 & 3, snares on
+    2 & 4, hats on the subdivisions. The kit is fixed-pitch for the track -
+    tuned once to the median voiced vocal f0 - and, when a drum stem is
+    provided, built from real one-shots sampled from it (cycled to avoid
+    machine-gun repetition), otherwise synthesized. Kick and snare hits duck a
+    band-limited (low-frequency) copy of the instrumental so the beat punches
+    through without pumping the whole mix.
+
+    Tunables default from the environment (``QUANTIZE_STRENGTH``,
+    ``DUCK_FLOOR``, ``DUCK_RELEASE_MS``, ``DUCK_BAND_LIMITED``) and can be
+    overridden per call.
     """
+    if quantize_strength is None:
+        quantize_strength = float(os.environ.get('QUANTIZE_STRENGTH', 0.65))
+    if duck_floor is None:
+        duck_floor = float(os.environ.get('DUCK_FLOOR', 0.7))
+    if duck_release_ms is None:
+        duck_release_ms = float(os.environ.get('DUCK_RELEASE_MS', 80.0))
+    if duck_band_limited is None:
+        env_v = os.environ.get('DUCK_BAND_LIMITED')
+        duck_band_limited = (env_v.strip().lower() not in ('0', 'false', 'no', 'off')
+                             if env_v is not None else True)
+
     inst, sr = sf.read(instrumental_wav)
     if len(inst.shape) == 1:
         inst = np.column_stack((inst, inst))
 
+    # Merge near-coincident onsets BEFORE quantization (quantization may
+    # collapse events onto the same gridline, handled during assignment).
     events = group_events(events)
 
-    # Filter out unvoiced events for percentile calculation (to not skew the kick/snare thresholds)
-    voiced_f0s = [e['f0'] for e in events if e.get('periodicity', 1.0) > 0.2 and e['f0'] > 0]
-    if not voiced_f0s:
-        voiced_f0s = [200]
-    p33, p66 = np.percentile(voiced_f0s, [33, 66])
+    # Beat-track the instrumental and build a 16th-note grid. Degenerate
+    # tracking (too few beats) disables quantization and falls back to raw
+    # times with a warning.
+    beat_times, tempo = track_beats(instrumental_wav)
+    if len(beat_times) < 8:
+        logger.warning(
+            "Beat tracking degenerate (%d beats) on %s; rendering unquantized.",
+            len(beat_times), instrumental_wav,
+        )
+        grid = None
+        offset = 0
+    else:
+        grid = _build_sixteenth_grid(beat_times)
+        offset = _estimate_downbeat_offset(beat_times, instrumental_wav)
 
-    # Prefer a kit sampled from the track's own drum stem; fall back to
-    # synthesized hits for any bucket the stem could not fill (or entirely,
-    # if no stem was provided / it yielded too few transients).
+    assignments = _quantize_and_assign_roles(events, grid, offset, quantize_strength)
+
+    # Fixed-pitch kit tuned once to the track's median voiced vocal f0.
+    voiced_f0s = [e['f0'] for e in events
+                  if e.get('periodicity', 1.0) > 0.2 and e.get('f0', 0.0) > 0]
+    median_f0 = float(np.median(voiced_f0s)) if voiced_f0s else None
+
     sampled_kit = build_drum_kit_from_stem(drums_wav, sr) if drums_wav else None
+    kit = _tune_kit(sampled_kit, sr, median_f0)
 
-    synth_samples = {
-        'low': generate_hit('low', sr=sr),
-        'mid': generate_hit('mid', sr=sr),
-        'high': generate_hit('high', sr=sr),
-    }
+    # Round-robin cursor per bucket so repeated hits aren't identical.
+    rr = {'low': 0, 'mid': 0, 'high': 0}
 
-    # Registers used to fold a syllable's f0 into a musically sensible target
-    # for each drum type when tuning the hit to the vocal pitch.
-    tune_ranges = {'low': (40.0, 110.0), 'mid': (150.0, 300.0), 'high': (3000.0, 8000.0)}
-
-    # Cache pitched variants keyed by (kind, rounded-semitone / rounded-pitch)
-    # so repeated pitches don't repeatedly pay for pitch shifting / synthesis.
-    variant_cache = {}
-
-    def get_sample(kind, target_f0):
-        target = _fold_to_range(target_f0, *tune_ranges[kind]) if target_f0 and target_f0 > 0 else None
-
-        if sampled_kit and kind in sampled_kit:
-            base = sampled_kit[kind]
-            base_pitch = base['pitch']
-            semitones = 0.0
-            if target is not None and base_pitch and base_pitch > 0:
-                # Bound the shift so sampled drums stay natural rather than
-                # being warped into obviously artificial territory.
-                semitones = float(np.clip(12.0 * np.log2(target / base_pitch), -6.0, 6.0))
-            key = (kind, 'S', round(semitones))
-            if key not in variant_cache:
-                variant_cache[key] = _repitch(base['sample'], round(semitones), sr)
-            return variant_cache[key]
-
-        # Synthesized fallback: (re)generate the hit tuned to the target pitch.
-        key = (kind, 'G', round(target) if target else 0)
-        if key not in variant_cache:
-            variant_cache[key] = generate_hit(kind, sr=sr, pitch=target) if target else synth_samples[kind]
-        return variant_cache[key]
+    def next_sample(kind):
+        variants = kit[kind]
+        samp = variants[rr[kind] % len(variants)]
+        rr[kind] += 1
+        return samp
 
     perc_track = np.zeros_like(inst)
     # Sidechain-style ducking envelope: 1.0 = no ducking, dips toward
-    # duck_floor briefly around every hit so the percussion punches through
-    # the instrumental instead of getting masked by it.
+    # duck_floor around each kick/snare so the beat punches through. Every dip
+    # has a short linear attack ramp and a linear release (no instantaneous
+    # gain steps, which would click).
     duck_envelope = np.ones(len(inst))
-    duck_floor = 0.45  # ~ -7 dB dip under each hit
-    duck_release_samples = int(sr * 0.12)
+    attack_samples = int(sr * 0.005)  # 5 ms attack ramp into every dip
+    release_samples = int(sr * duck_release_ms / 1000.0)
 
-    # Also prepare MIDI
+    # MIDI with a real tempo so it imports on-grid into a DAW.
     mid = mido.MidiFile()
     track = mido.MidiTrack()
     mid.tracks.append(track)
+    ticks_per_beat = 480
+    mid.ticks_per_beat = ticks_per_beat
+    bpm = tempo if tempo and tempo > 0 else 120.0
+    tempo_us = mido.bpm2tempo(bpm)
+    track.append(mido.MetaMessage('set_tempo', tempo=tempo_us, time=0))
+    note_len_ticks = max(1, ticks_per_beat // 8)  # ~32nd-note gate
+    last_tick = 0
 
-    last_time_ticks = 0
-    ticks_per_second = 1000 # easy mapping
-    mid.ticks_per_beat = 500 # standard
+    assignments.sort(key=lambda a: a['t'])
 
-    # Sort events by time
-    events.sort(key=lambda x: x['t'])
-
-    for e in events:
-        t_sec = e['t']
+    for a in assignments:
+        t_sec = a['t']
         idx = int(t_sec * sr)
-        per = e.get('periodicity', 1.0)
-        f0 = e.get('f0', 0.0)
+        kind = a['kind']
+        note = a['note']
+        strength = a['strength']
 
-        # determine bucket
-        if per <= 0.2:
-            # Unvoiced consonants are explicitly mapped to hats
-            kind = 'high'
-            note = 42 # Closed Hat
-        elif f0 < p33:
-            kind = 'low'
-            note = 36 # Kick
-        elif f0 < p66:
-            kind = 'mid'
-            note = 38 # Snare
-        else:
-            kind = 'high'
-            note = 42 # Closed Hat
+        samp = next_sample(kind)
 
-        # Tune the hit to the syllable's pitch (skip for unvoiced hats, which
-        # have no meaningful fundamental).
-        tune_f0 = f0 if per > 0.2 else None
-        samp = get_sample(kind, tune_f0)
+        # Perceptual gain curve: floor of 0.3, rising with strength, clamped to
+        # 0.9 so nothing clips or dominates.
+        gain = min(0.9, 0.3 + 0.6 * (strength ** 0.6))
+        vel = int(min(127, max(1, strength * 127)))
 
-        # Perceptual scaling, biased up from the original (0.6 exp, 0.8 max)
-        # so hits are clearly audible rather than a subtle accent.
-        gain = (e['strength'] ** 0.5)
-        vel = int(min(127, max(1, e['strength'] * 127)))
-
-        # Add to audio
         end_idx = min(idx + len(samp), len(perc_track))
         samp_len = end_idx - idx
         if samp_len > 0:
             perc_track[idx:end_idx] += samp[:samp_len] * gain
 
-        # Duck the instrumental under this hit: quick dip, exponential release
-        duck_end = min(idx + duck_release_samples, len(duck_envelope))
-        duck_len = duck_end - idx
-        if duck_len > 0:
-            release = np.linspace(0, 1, duck_len)
-            dip = duck_floor + (1.0 - duck_floor) * (1 - np.exp(-release * 8))
-            duck_envelope[idx:duck_end] = np.minimum(duck_envelope[idx:duck_end], dip)
+        # Only kick and snare duck the instrumental; hats do not.
+        if kind in (_ROLE_KICK[0], _ROLE_SNARE[0]):
+            a0 = max(0, idx - attack_samples)
+            if idx > a0:
+                ramp = np.linspace(1.0, duck_floor, idx - a0)
+                duck_envelope[a0:idx] = np.minimum(duck_envelope[a0:idx], ramp)
+            r_end = min(len(duck_envelope), idx + release_samples)
+            if r_end > idx:
+                rel = np.linspace(duck_floor, 1.0, r_end - idx)
+                duck_envelope[idx:r_end] = np.minimum(duck_envelope[idx:r_end], rel)
 
-        # Add to MIDI
-        t_ticks = int(t_sec * ticks_per_second)
-        delta_ticks = t_ticks - last_time_ticks
-
-        track.append(mido.Message('note_on', note=note, velocity=vel, time=delta_ticks))
-        track.append(mido.Message('note_off', note=note, velocity=0, time=10)) # short duration
-        last_time_ticks = t_ticks + 10
+        # MIDI: absolute tick from real time, delta-encoded.
+        abs_tick = int(round(mido.second2tick(t_sec, ticks_per_beat, tempo_us)))
+        delta = max(0, abs_tick - last_tick)
+        track.append(mido.Message('note_on', note=note, velocity=vel, time=delta))
+        track.append(mido.Message('note_off', note=note, velocity=0, time=note_len_ticks))
+        last_tick = abs_tick + note_len_ticks
 
     midi_path = output_mix_wav.replace('.wav', '.mid')
     mid.save(midi_path)
@@ -705,9 +994,9 @@ def render_percussion(events: list, instrumental_wav: str, output_mix_wav: str, 
     perc_only_path = output_mix_wav.replace('.wav', '_perc_only.wav')
     sf.write(perc_only_path, perc_track, sr)
 
-    # Mix: duck the instrumental around each hit, then layer percussion at
-    # (near) unity gain rather than attenuating it below the instrumental.
-    ducked_inst = inst * duck_envelope[:, np.newaxis]
+    # Mix: duck the (low band of the) instrumental around kick/snare hits, then
+    # layer percussion on top.
+    ducked_inst = _apply_duck(inst, duck_envelope, sr, duck_band_limited)
     mix = ducked_inst + perc_track
 
     # Loudness normalization
