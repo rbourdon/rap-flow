@@ -20,6 +20,36 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Database
+
+This project uses Prisma with a PostgreSQL (Neon) database. The schema lives in
+`prisma/schema.prisma`.
+
+Set `DATABASE_URL` to your Postgres connection string, then sync the schema so the
+required tables (`user`, `session`, `account`, `verification`, `job`) exist. **If
+the schema is not synced, `GET /` and other database-backed routes return a 500
+error because the tables are missing.**
+
+```bash
+# Sync the Prisma schema to the database referenced by DATABASE_URL
+npm run db:deploy
+```
+
+`db:deploy` runs `prisma db push`, which reconciles the database with
+`schema.prisma` without requiring a migration history. This is intentional: the
+database may already contain tables (e.g. created by Better Auth), so
+`prisma migrate deploy` would fail with `P3005 "The database schema is not empty"`.
+`db push` instead creates only the missing tables/columns and is safe to re-run on
+every deploy.
+
+The `build` script runs `db:deploy` automatically, so the schema is synced on
+deploy whenever `DATABASE_URL` is available (it is skipped with a warning when
+`DATABASE_URL` is not set). After editing `schema.prisma`, apply the changes with:
+
+```bash
+npx prisma db push
+```
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
