@@ -2,7 +2,8 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { reprocessJob, type WorkflowStage } from '@/app/actions'
+import { reprocessJob } from '@/app/actions'
+import { type WorkflowStage } from '@/app/workflow-stages'
 
 // Stages a user can meaningfully re-run for an existing job. `finalize` (blob
 // upload) is excluded - it always runs as part of any reprocess. Each entry

@@ -4,18 +4,7 @@ import { prisma } from '@/lib/db'
 import { revalidatePath } from 'next/cache'
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
-
-// Machine-readable workflow stages, in execution order. Must stay in sync with
-// backend/workflow.py STAGES.
-export const WORKFLOW_STAGES = [
-  'ingest',
-  'separate',
-  'detect',
-  'render',
-  'finalize',
-] as const
-
-export type WorkflowStage = (typeof WORKFLOW_STAGES)[number]
+import { WORKFLOW_STAGES, type WorkflowStage } from './workflow-stages'
 
 // Fire-and-forget trigger to the Modal worker. The Next.js side only *triggers*
 // the workflow (optionally at a specific stage / with param overrides) and
