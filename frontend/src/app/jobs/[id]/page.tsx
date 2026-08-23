@@ -46,23 +46,23 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
   }
 
   return (
-    <div className="min-h-screen bg-black text-white selection:bg-white/20 selection:text-white font-sans flex flex-col">
+    <div className="min-h-screen bg-black text-white selection:bg-white/20 selection:text-white font-sans flex flex-col overflow-x-hidden">
       <div className="fixed inset-0 bg-grid-white/[0.02] bg-[size:50px_50px]" />
-      <main className="flex-grow pt-32 pb-20 relative z-10 w-full max-w-7xl mx-auto px-6">
+      <main className="flex-grow pt-20 md:pt-32 pb-20 relative z-10 w-full max-w-7xl mx-auto px-4 sm:px-6">
       <Link href="/" className="text-indigo-400 hover:underline mb-4 inline-block">&larr; Back to Jobs</Link>
 
-      <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-4">Job Details</h1>
+      <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight mb-4">Job Details</h1>
 
-      <div className="bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm mb-8 text-neutral-400">
-        <div className="flex justify-between items-start">
-          <div>
+      <div className="bg-white/[0.02] border border-white/5 rounded-3xl p-5 sm:p-8 shadow-2xl backdrop-blur-sm mb-8 text-neutral-400">
+        <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start gap-4">
+          <div className="min-w-0 space-y-1">
             <p><strong className="text-white/80">Status:</strong> {job.status}</p>
-            <p><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
+            <p className="break-words"><strong className="text-white/80">Source:</strong> {job.sourceType === 'URL' ? job.sourceUrl : 'Upload'}</p>
             <p><strong className="text-white/80">Created:</strong> <ClientDate date={job.createdAt} /></p>
-            {job.error && <p className="text-red-500"><strong className="text-white/80">Error:</strong> {job.error}</p>}
+            {job.error && <p className="text-red-500 break-words"><strong className="text-white/80">Error:</strong> {job.error}</p>}
           </div>
           {job.status === 'FAILED' && (
-            <div>
+            <div className="flex-shrink-0">
               <RetryButton jobId={job.id} />
             </div>
           )}
@@ -76,7 +76,7 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
 
       {job.status === 'COMPLETED' && job.resultBlobUrl && (
 
-        <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm">
+        <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-5 sm:p-8 shadow-2xl backdrop-blur-sm">
           <h2 className="text-xl font-semibold mb-4">Result Mix</h2>
 
           <WaveSurferPlayer
@@ -95,7 +95,7 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
       )}
 
       {job.status === 'COMPLETED' && !job.resultBlobUrl && (
-        <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-8 shadow-2xl backdrop-blur-sm text-neutral-400">
+        <div className="mt-8 bg-white/[0.02] border border-white/5 rounded-3xl p-5 sm:p-8 shadow-2xl backdrop-blur-sm text-neutral-400">
           <p className="text-red-500">
             This job finished but no result file was produced. Please retry the job.
           </p>

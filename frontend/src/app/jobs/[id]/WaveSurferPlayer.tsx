@@ -65,6 +65,11 @@ export function WaveSurferPlayer({ audioUrl, percUrl, instUrl, events }: Props) 
     ws.on('play', () => {
       setIsPlaying(true)
       if (percUrl && instUrl) {
+        // Align the stems to the waveform playhead once, right before starting,
+        // so we don't have to seek them repeatedly during playback.
+        const time = ws.getCurrentTime()
+        if (percAudioRef.current) percAudioRef.current.currentTime = time
+        if (instAudioRef.current) instAudioRef.current.currentTime = time
         percAudioRef.current?.play().catch(console.error)
         instAudioRef.current?.play().catch(console.error)
       }
@@ -92,8 +97,12 @@ export function WaveSurferPlayer({ audioUrl, percUrl, instUrl, events }: Props) 
     })
 
     ws.on('timeupdate', (time) => {
-        // Occasionally resync if they drift too far apart
-        const MAX_DRIFT = 0.1
+        // The two stems share the browser's audio clock, so once started together
+        // they stay in sync with each other. We only nudge them back to the waveform
+        // playhead if they drift far enough to be noticeable. Seeking on every small
+        // drift re-buffers the <audio> elements and makes the sound choppy, so keep
+        // the threshold high and only correct rare, large drifts (e.g. tab throttling).
+        const MAX_DRIFT = 0.5
         if (percUrl && instUrl) {
             if (percAudioRef.current && Math.abs(percAudioRef.current.currentTime - time) > MAX_DRIFT) {
                  percAudioRef.current.currentTime = time
@@ -135,7 +144,14 @@ export function WaveSurferPlayer({ audioUrl, percUrl, instUrl, events }: Props) 
       <audio ref={instAudioRef} src={instUrl} preload="auto" />
 
       <div className="relative w-full mb-6">
-        <div ref={containerRef} className="w-full border border-white/10 rounded-xl overflow-hidden bg-black/50" />
+        <div ref={containerRef} className="w-full min-h-[80px] border border-white/10 rounded-xl overflow-hidden bg-black/50" />
+        {/* Loading state while the waveform and stems are still being fetched/decoded. */}
+        {!isReady && !error && (
+          <div className="absolute inset-0 flex items-center justify-center gap-3 rounded-xl bg-black/50">
+            <span className="h-5 w-5 rounded-full border-2 border-white/20 border-t-indigo-400 animate-spin" />
+            <span className="text-sm text-neutral-400">Loading tracks…</span>
+          </div>
+        )}
         {/* Lightweight overlay markers for detected syllable onsets. */}
         {isReady && duration > 0 && (
           <div className="pointer-events-none absolute inset-0">
@@ -158,7 +174,7 @@ export function WaveSurferPlayer({ audioUrl, percUrl, instUrl, events }: Props) 
           <button
             onClick={onPlayPause}
             disabled={!isReady}
-            className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-8 rounded-full disabled:opacity-50 transition-colors"
+            className="w-full md:w-auto flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-8 rounded-full disabled:opacity-50 transition-colors"
           >
             {isPlaying ? 'Pause' : 'Play'}
           </button>
@@ -215,7 +231,7 @@ export function WaveSurferPlayer({ audioUrl, percUrl, instUrl, events }: Props) 
           <button
             onClick={onPlayPause}
             disabled={!isReady}
-            className="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-8 rounded-full disabled:opacity-50 transition-colors"
+            className="w-full sm:w-auto flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 px-8 rounded-full disabled:opacity-50 transition-colors"
           >
             {isPlaying ? 'Pause' : 'Play'}
           </button>
