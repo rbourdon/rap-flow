@@ -24,3 +24,6 @@ frontend/node_modules/
 .agents/
 .windsurf/
 .claude/
+
+# Ship the bundled default drum kit despite the global *.wav ignore above.
+!backend/kits/default/**/*.wav
