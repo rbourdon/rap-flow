@@ -34,8 +34,8 @@ def _write(drum_class, layer, variant, mono):
     stereo = np.column_stack((mono, mono))
     out_dir = os.path.join(KIT_ROOT, drum_class)
     os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"v{layer}_rr{variant}.wav")
-    sf.write(path, stereo, SR, subtype="PCM_16")
+    path = os.path.join(out_dir, f"v{layer}_rr{variant}.flac")
+    sf.write(path, stereo, SR, format="FLAC", subtype="PCM_16")
     return path
 
 
