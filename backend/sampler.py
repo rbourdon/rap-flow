@@ -9,7 +9,7 @@ resampling is the tiny pseudo-round-robin varispeed).
 
 Kit layout on disk::
 
-    kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.wav
+    kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.[wav|flac]
 
 e.g. ``kits/default/kick/v1_rr1.wav``, ``kits/default/kick/v3_rr2.wav``. The
 nine drum classes are ``kick, snare, hat_closed, hat_open, tom_low, tom_mid,
@@ -84,8 +84,8 @@ def _normalize_peak(sample, target=0.98):
     return sample
 
 
-def _load_wav(path, target_sr):
-    """Load a WAV as stereo float32 at ``target_sr`` (peak-normalized)."""
+def _load_audio(path, target_sr):
+    """Load a WAV or FLAC as stereo float32 at ``target_sr`` (peak-normalized)."""
     data, file_sr = sf.read(path, dtype="float32")
     if data.ndim == 1:
         data = _to_stereo(data)
@@ -143,7 +143,7 @@ class DrumKit:
 
     @classmethod
     def load(cls, kit_dir, sr):
-        """Scan ``kit_dir`` and load every ``v<layer>_rr<variant>.wav``."""
+        """Scan ``kit_dir`` and load every ``v<layer>_rr<variant>.[wav|flac]``."""
         kit = cls(sr)
         for drum_class in DRUM_CLASSES:
             class_dir = os.path.join(kit_dir, drum_class)
@@ -151,7 +151,7 @@ class DrumKit:
                 continue
             # Group files by layer number, then order variants within a layer.
             by_layer = {}
-            for path in sorted(glob.glob(os.path.join(class_dir, "v*_rr*.wav"))):
+            for path in sorted(glob.glob(os.path.join(class_dir, "v*_rr*.wav")) + glob.glob(os.path.join(class_dir, "v*_rr*.flac"))):
                 name = os.path.splitext(os.path.basename(path))[0]
                 try:
                     layer_str, rr_str = name.split("_")
@@ -166,12 +166,12 @@ class DrumKit:
             layers = []
             for layer_n in sorted(by_layer):  # soft -> loud
                 variants = [by_layer[layer_n][rr] for rr in sorted(by_layer[layer_n])]
-                layers.append([_load_wav(p, sr) for p in variants])
+                layers.append([_load_audio(p, sr) for p in variants])
             kit.layers[drum_class] = layers
         if not kit.layers:
             raise FileNotFoundError(
                 f"No usable drum samples found under {kit_dir!r}. Expected files "
-                f"like <drum_class>/v1_rr1.wav."
+                f"like <drum_class>/v1_rr1.wav or .flac."
             )
         return kit
 

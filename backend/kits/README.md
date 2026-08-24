@@ -7,7 +7,7 @@ those kits.
 ## Folder format
 
 ```
-kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.wav
+kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.[wav|flac]
 ```
 
 - `<kit_name>` — the kit folder (the bundled one is `default`). Point the
@@ -34,7 +34,7 @@ kits/default/kick/v2_rr2.wav   # loud kick, round-robin 2
 kits/default/crash/v1_rr1.wav  # single crash one-shot
 ```
 
-Files may be mono or stereo WAV at any sample rate — they are resampled to the
+Files may be mono or stereo WAV or FLAC at any sample rate — they are resampled to the
 render rate on load. The loader scans the directory, so **any conforming folder
 works**: drop real samples in and they are picked up automatically. Classes with
 no folder are simply skipped.
