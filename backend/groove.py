@@ -131,7 +131,8 @@ def heuristic_drum_score(events, instrumental_wav):
 
     notes.sort(key=lambda n: n["t"])
     return {"tempo": float(tempo) if tempo else 0.0, "notes": notes,
-            "model_used": False}
+            "model_used": False,
+            "beat_times": [float(b) for b in beat_times]}
 
 
 def _quantize_and_assign(events, grid, offset):
@@ -236,7 +237,10 @@ def generate_drum_score(events, instrumental_wav, temperature=None,
         beat_times, tempo = rhythm.track_beats(instrumental_wav)
         if not tempo or tempo <= 0:
             tempo = 120.0
-        notes = groovae.tap2drum(taps, tempo=tempo, temperature=temperature)
+        # Pass the drifting beat times so the model windows follow the song's
+        # actual tempo (handles tracks whose tempo changes), not one global BPM.
+        notes = groovae.tap2drum(taps, tempo=tempo, temperature=temperature,
+                                 beat_times=beat_times)
         # Normalize model output onto our nine classes.
         cleaned = []
         for n in notes:
@@ -250,15 +254,20 @@ def generate_drum_score(events, instrumental_wav, temperature=None,
                 "drum_class": drum_class,
             })
         cleaned = _dedupe(cleaned)
+        # Soft-snap onto the local 16th grid so any residual drift inside a
+        # window is absorbed (grid interpolates the *actual* beats, so it tracks
+        # tempo changes). No-op when the beat grid is degenerate.
+        cleaned = _snap_to_grid(cleaned, beat_times)
         # Plausibility gating: cap kick/snare per bar and enforce a per-class
         # minimum inter-hit gap so the model can't emit a machine-gun wash.
-        cleaned = _gate_model_notes(cleaned, tempo)
+        cleaned = _gate_model_notes(cleaned, tempo, beat_times)
         if not cleaned:
             raise RuntimeError("GrooVAE returned no usable notes")
         cleaned.sort(key=lambda n: n["t"])
         logger.info("GrooVAE produced %d drum notes.", len(cleaned))
         return {"tempo": float(tempo), "notes": cleaned, "model_used": True,
-                "warning": None}
+                "warning": None,
+                "beat_times": [float(b) for b in beat_times]}
     except Exception as exc:  # noqa: BLE001 - never fail the job on Magenta
         warning = f"GrooVAE unavailable ({exc}); using heuristic drum score."
         logger.warning(warning)
@@ -283,6 +292,29 @@ def _dedupe(notes, eps=0.03):
     return kept
 
 
+def _snap_to_grid(notes, beat_times, tol=0.03):
+    """Soft-snap note times onto the local 16th grid built from actual beats.
+
+    Reuses :func:`rhythm.build_sixteenth_grid`, which interpolates between the
+    *real* beat times, so the grid follows tempo drift. A note is nudged onto its
+    nearest gridline only when it is within ``tol`` seconds of it; otherwise its
+    micro-timing is preserved. No-op when the beat grid is degenerate.
+    """
+    if not notes or beat_times is None or len(beat_times) < 2:
+        return notes
+    grid_times, _, _ = rhythm.build_sixteenth_grid(np.asarray(beat_times, float))
+    if len(grid_times) == 0:
+        return notes
+    grid_times = np.asarray(grid_times, dtype=float)
+    for n in notes:
+        t = float(n["t"])
+        k = int(np.argmin(np.abs(grid_times - t)))
+        gt = float(grid_times[k])
+        if abs(gt - t) <= tol:
+            n["t"] = gt
+    return notes
+
+
 # Minimum time (seconds) between two hits of the same class on the model path.
 # Kicks/snares are spaced further apart than hats, which legitimately subdivide.
 _MODEL_MIN_GAP = {
@@ -297,7 +329,34 @@ _MODEL_MIN_GAP_DEFAULT = 0.08
 _MODEL_BAR_CAP = {"kick": 4, "snare": 2}
 
 
-def _gate_model_notes(notes, tempo):
+def _bar_index_fn(tempo, beat_times):
+    """Return a function mapping a time to its 4/4 bar index.
+
+    Prefers the **actual** beat times (bar = every 4 beats), so bar boundaries
+    track tempo changes. Falls back to a constant-tempo ``bar_sec`` when the beat
+    grid is degenerate, and to ``None`` when neither is usable.
+    """
+    beats = np.asarray(beat_times, dtype=float) if beat_times is not None else None
+    if beats is not None and len(beats) >= 5:
+        sorted_beats = np.sort(beats)
+
+        def bar_of(t):
+            # Number of whole beats at or before t, // 4 -> bar index. Times
+            # before the first beat fall in bar 0.
+            beats_elapsed = int(np.searchsorted(sorted_beats, t, side="right")) - 1
+            if beats_elapsed < 0:
+                beats_elapsed = 0
+            return beats_elapsed // 4
+
+        return bar_of
+
+    if tempo and tempo > 0:
+        bar_sec = 4.0 * 60.0 / float(tempo)
+        return lambda t: int(t // bar_sec)
+    return None
+
+
+def _gate_model_notes(notes, tempo, beat_times=None):
     """Gate GrooVAE output: per-class min gap + per-bar kick/snare caps.
 
     The model can emit an implausibly dense stream of hits (especially after the
@@ -305,6 +364,8 @@ def _gate_model_notes(notes, tempo):
     control so the drums read as a groove rather than a wash: hits of the same
     class closer than a per-class minimum gap are dropped (keeping the louder
     one), and kicks/snares are capped per 4/4 bar (weakest overflow removed).
+    Bar membership is derived from the actual ``beat_times`` when available, so
+    the caps stay correct on tempo-changing tracks.
     """
     if not notes:
         return notes
@@ -326,16 +387,13 @@ def _gate_model_notes(notes, tempo):
         last_kept[cls] = len(kept)
         kept.append(n)
 
-    if tempo and tempo > 0:
-        bar_sec = 4.0 * 60.0 / float(tempo)
-    else:
-        bar_sec = None
+    bar_of = _bar_index_fn(tempo, beat_times)
 
     # 2. Cap kicks/snares per bar, dropping the weakest overflow.
-    if bar_sec and bar_sec > 0:
+    if bar_of is not None:
         bars = {}
         for n in kept:
-            bars.setdefault(int(n["t"] // bar_sec), []).append(n)
+            bars.setdefault(bar_of(n["t"]), []).append(n)
         drop = set()
         for items in bars.values():
             for cls, cap in _MODEL_BAR_CAP.items():
