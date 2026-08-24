@@ -41,13 +41,13 @@ no folder are simply skipped.
 
 ## The bundled `default` kit
 
-The `default/` kit ships **synthesized placeholder one-shots** so the pipeline
-works out of the box with no external assets. Everything is generated from
-scratch (no sampled material), so it is CC0 / public domain. It provides 2
-velocity layers × 2 round-robins for `kick`, `snare`, and `hat_closed`, plus a
-single one-shot for each of the other classes.
+The `default/` kit ships **real one-shots from the Salamander Drumkit** by
+Alexander Holm (CC-BY 3.0), restructured into this layer/round-robin layout so
+the pipeline works out of the box. See `default/README.md` and `default/LICENSE`
+for attribution and the per-class layer map.
 
-To regenerate the placeholders (or as a starting point for your own kit):
+`kits/generate_default_kit.py` can regenerate **synthesized placeholder**
+one-shots (CC0) as a fallback or as a starting point for your own kit:
 
 ```bash
 python kits/generate_default_kit.py
