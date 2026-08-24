@@ -1,6 +1,7 @@
 'use server'
 
 import { prisma } from '@/lib/db'
+import { del } from '@vercel/blob'
 import { revalidatePath } from 'next/cache'
 import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
@@ -186,4 +187,56 @@ export async function reprocessJob(
   revalidatePath(`/jobs/${jobId}`);
   revalidatePath('/');
   return updatedJob.id;
+}
+
+// Permanently delete a job and every Vercel Blob it produced. Vercel Blob's
+// free tier is small, so removing a job must also reclaim the storage its
+// input/result/stem/event files occupy. Blob deletion is best-effort and
+// idempotent: `del` doesn't throw for URLs that were already removed (e.g.
+// blobs deleted manually while the store was over quota), so a partially
+// broken job can still be cleaned up and its DB row removed.
+export async function deleteJob(jobId: string) {
+  const session = await auth.api.getSession({
+    headers: await headers()
+  });
+
+  if (!session?.user) {
+    throw new Error('Unauthorized');
+  }
+
+  const job = await prisma.job.findUnique({
+    where: { id: jobId }
+  });
+
+  if (!job) {
+    throw new Error('Job not found');
+  }
+
+  if (job.userId !== session.user.id) {
+    throw new Error('Unauthorized');
+  }
+
+  const blobUrls = [
+    job.inputBlobUrl,
+    job.resultBlobUrl,
+    job.eventsBlobUrl,
+    job.percBlobUrl,
+    job.instBlobUrl,
+  ].filter((url): url is string => Boolean(url));
+
+  if (blobUrls.length > 0) {
+    try {
+      await del(blobUrls, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    } catch (error) {
+      // Don't block DB deletion if blob cleanup fails (e.g. a blob was already
+      // removed manually). Surface it in logs so orphaned blobs can be noticed.
+      console.error(`Failed to delete blobs for job ${jobId}:`, error);
+    }
+  }
+
+  await prisma.job.delete({
+    where: { id: jobId }
+  });
+
+  revalidatePath('/');
 }
