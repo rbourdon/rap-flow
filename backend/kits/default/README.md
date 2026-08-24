@@ -14,11 +14,16 @@ kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.flac
 - rr<variant>: round-robin variants within a layer
 - Loader must accept .wav and .flac (soundfile reads both natively)
 
+Every file here is a real Salamander sample. (Earlier revisions interleaved
+synthesized placeholder one-shots in the same layers; those have been removed so
+the kit is 100% real samples and no longer alternates between real and synthetic
+hits.)
+
 ## Layer map (this kit)
 
-- kick:   v1=P, v2=F, v3=FF (3 RR each)
-- snare:  v1=ghost, v2=MP, v3=F, v4=FF (3 RR each)
-- hat_closed: v1=P, v2=F (4 RR each)
-- hat_open:   v1=P, v2=F, v3=FF (2 RR each)
-- toms:   v1=soft, v2=med, v3=loud (2 RR each)
-- crash/ride: v1=soft, v2=loud (2 RR each)
+- kick:   v1=P, v2=F, v3=FF (v1/v2 = 1 RR, v3 = 3 RR)
+- snare:  v1=ghost, v2=MP, v3=F, v4=FF (v1/v2 = 1 RR, v3/v4 = 3 RR)
+- hat_closed: v1=P, v2=F (2 RR each)
+- hat_open:   v1=P, v2=F, v3=FF (v1 = 1 RR, v2/v3 = 2 RR)
+- toms:   v1=soft, v2=med, v3=loud (v1 = 1 RR, v2/v3 = 2 RR)
+- crash/ride: v1=soft, v2=loud (v1 = 1 RR, v2 = 2 RR)
