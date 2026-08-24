@@ -86,6 +86,19 @@ model Job {
   eventsBlobUrl String?
   percBlobUrl   String?
   instBlobUrl   String?
+  // Compressed (Opus in Ogg) playback copies. The WAVs above remain the
+  // download artifacts; these are streamed for playback so a completed job
+  // doesn't pull 100+ MB of WAV. Nullable so old jobs fall back to WAV.
+  mixOpusBlobUrl  String?
+  percOpusBlobUrl String?
+  instOpusBlobUrl String?
+  // The generated MIDI file (previously produced then discarded).
+  midBlobUrl    String?
+  // Source metadata captured during ingest (or the filename for uploads).
+  title         String?
+  thumbnailUrl  String?
+  durationSec   Int?
+  uploader      String?
   error         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

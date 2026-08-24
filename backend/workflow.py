@@ -182,20 +182,38 @@ def _filter_params(params: dict, keys) -> dict:
 # is what makes ``from_stage`` re-runs possible.
 # ---------------------------------------------------------------------------
 
+def _metadata_path(root: str, source_url: str) -> str:
+    return os.path.join(source_dir(root, source_url), "metadata.json")
+
+
 def stage_ingest(root: str, source_url: str, params: dict = None,
                  force: bool = False, yt_cookies: str = None,
                  yt_proxy: str = None) -> dict:
     """Download/normalize the source audio to ``input.wav`` (cache-aware)."""
     input_wav = source_input_path(root, source_url)
     os.makedirs(os.path.dirname(input_wav), exist_ok=True)
+    meta_path = _metadata_path(root, source_url)
 
     if not force and os.path.exists(input_wav):
-        return {"input_wav": input_wav, "reused": True}
+        metadata = {}
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path) as f:
+                    metadata = json.load(f)
+            except (ValueError, OSError):
+                metadata = {}
+        return {"input_wav": input_wav, "metadata": metadata, "reused": True}
 
-    pipeline.ingest_audio(
+    res = pipeline.ingest_audio(
         source_url, input_wav, yt_cookies=yt_cookies, yt_proxy=yt_proxy
     )
-    return {"input_wav": input_wav, "reused": False}
+    metadata = res.get("metadata") or {} if isinstance(res, dict) else {}
+    try:
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f)
+    except OSError:
+        pass
+    return {"input_wav": input_wav, "metadata": metadata, "reused": False}
 
 
 def stage_separate(root: str, source_url: str, params: dict = None,

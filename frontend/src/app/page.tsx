@@ -4,7 +4,54 @@ import { headers } from 'next/headers'
 import { UploadWidget } from '@/components/Upload'
 import { JobList } from '@/components/JobList'
 import { AuthForm } from '@/components/AuthForm'
-import { SignOutButton } from '@/components/SignOutButton'
+
+const GITHUB_URL = 'https://github.com/rbourdon/rap-flow'
+
+function Footer() {
+  return (
+    <footer className="border-t border-white/5 py-8 text-center relative z-10 bg-black">
+      <p className="text-sm text-neutral-400">
+        rap-flow ·{' '}
+        <a
+          href={GITHUB_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-indigo-400 hover:underline"
+        >
+          GitHub
+        </a>
+      </p>
+    </footer>
+  )
+}
+
+const FEATURES = [
+  {
+    title: 'Separate',
+    body: 'Demucs splits the track into vocals and instrumental so the flow can be analyzed on its own.',
+    color: 'text-indigo-400',
+    ring: 'border-indigo-500/20 bg-indigo-500/10',
+    icon: (
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM19 10v2a7 7 0 0 1-14 0v-2M12 19v3" />
+    ),
+  },
+  {
+    title: 'Detect',
+    body: "Onset detection finds each syllable in the vocal, marking where the percussion should hit.",
+    color: 'text-cyan-400',
+    ring: 'border-cyan-500/20 bg-cyan-500/10',
+    icon: <path d="M3 12h4l3 8 4-16 3 8h4" />,
+  },
+  {
+    title: 'Render',
+    body: "Those onsets become a percussion track, quantized to the song's grid and mixed back with the instrumental.",
+    color: 'text-purple-400',
+    ring: 'border-purple-500/20 bg-purple-500/10',
+    icon: (
+      <path d="M9 18V5l12-2v13M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+    ),
+  },
+]
 
 export default async function Home() {
   const session = await auth.api.getSession({
@@ -16,116 +63,47 @@ export default async function Home() {
       <div className="min-h-screen bg-black text-white selection:bg-white/20 selection:text-white flex flex-col overflow-x-hidden font-sans">
         <div className="fixed inset-0 bg-grid-white/[0.02] bg-[size:50px_50px]" />
 
-        {/* Navigation */}
-        <nav className="fixed top-0 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl z-50 transition-all duration-300">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 sm:h-20 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 group cursor-pointer min-w-0">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-500 to-cyan-400 flex items-center justify-center transform group-hover:scale-105 transition-all duration-300 shadow-[0_0_20px_rgba(99,102,241,0.3)]">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M6 3v18" />
-                  <path d="M12 7v10" />
-                  <path d="M18 10v4" />
-                </svg>
-              </div>
-              <span className="font-bold text-xl tracking-tight text-white/90 group-hover:text-white transition-colors">FlowBeat</span>
-            </div>
-            <AuthForm className="scale-90 origin-right" />
-          </div>
-        </nav>
-
         <main className="flex-grow pt-24 sm:pt-32 pb-20 relative z-10 flex flex-col">
           {/* Hero Section */}
           <section className="relative px-4 sm:px-6 pt-12 sm:pt-20 pb-20 sm:pb-32 max-w-5xl mx-auto w-full text-center flex flex-col items-center">
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-[800px] h-[600px] bg-gradient-to-tr from-indigo-500/20 via-purple-500/10 to-cyan-500/20 blur-[120px] rounded-full pointer-events-none -z-10" />
 
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 mb-8 sm:mb-12 animate-[fade-in-up_1s_ease-out]">
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-cyan-500"></span>
-              </span>
-              <span className="text-sm font-medium text-white/80 tracking-wide uppercase">V2 Engine Now Live</span>
-            </div>
-
-            <h1 className="text-4xl sm:text-5xl md:text-8xl font-extrabold tracking-tight mb-6 sm:mb-8 leading-[1.1] animate-[fade-in-up_1s_ease-out_0.2s_both]">
-              Your voice is the <br className="hidden md:block" />
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400 animate-[gradient_8s_ease_infinite] bg-[length:200%_200%]">
-                ultimate drum kit.
+            <h1 className="text-4xl sm:text-5xl md:text-7xl font-extrabold tracking-tight mb-6 sm:mb-8 leading-[1.1]">
+              Turn vocal flow into <br className="hidden md:block" />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-purple-400 to-cyan-400">
+                percussion.
               </span>
             </h1>
 
-            <p className="text-lg sm:text-xl md:text-2xl text-neutral-300 mb-10 sm:mb-12 max-w-2xl font-light leading-relaxed animate-[fade-in-up_1s_ease-out_0.4s_both]">
-              Transform any acapella rap into a studio-quality percussion track. Powered by next-gen AI separation and onset detection.
+            <p className="text-lg sm:text-xl md:text-2xl text-neutral-300 mb-10 sm:mb-12 max-w-2xl font-light leading-relaxed">
+              rap-flow separates a song&apos;s vocals with Demucs, detects the syllable onsets,
+              and renders them as a percussion track mapped to the song&apos;s grid.
             </p>
 
-            <div className="animate-[fade-in-up_1s_ease-out_0.6s_both]">
+            <div>
               <AuthForm className="transform scale-110" />
-              <p className="mt-6 text-sm text-neutral-400 font-medium">No credit card required. Free tier forever.</p>
             </div>
           </section>
 
-          {/* Feature Grid */}
+          {/* Feature Grid — the real pipeline stages */}
           <section className="px-4 sm:px-6 py-16 sm:py-24 border-t border-white/5 bg-black/40 backdrop-blur-sm">
             <div className="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-6 sm:gap-8">
-              {/* Feature 1 */}
-              <div className="p-6 sm:p-8 rounded-3xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] transition-all duration-500 group">
-                <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 flex items-center justify-center mb-6 border border-indigo-500/20 group-hover:scale-110 transition-transform duration-500">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-400">
-                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                    <line x1="12" x2="12" y1="19" y2="22" />
-                  </svg>
+              {FEATURES.map((f) => (
+                <div key={f.title} className="p-6 sm:p-8 rounded-3xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] transition-colors group">
+                  <div className={`w-14 h-14 rounded-2xl flex items-center justify-center mb-6 border ${f.ring}`}>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={f.color}>
+                      {f.icon}
+                    </svg>
+                  </div>
+                  <h3 className="text-2xl font-bold mb-3 text-white/90">{f.title}</h3>
+                  <p className="text-neutral-300 leading-relaxed font-light">{f.body}</p>
                 </div>
-                <h3 className="text-2xl font-bold mb-3 text-white/90">Vocal Separation</h3>
-                <p className="text-neutral-300 leading-relaxed font-light">
-                  Industry-leading Demucs v4 isolates the purest transients from your flow, rejecting background noise perfectly.
-                </p>
-              </div>
-
-              {/* Feature 2 */}
-              <div className="p-6 sm:p-8 rounded-3xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] transition-all duration-500 group">
-                <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 flex items-center justify-center mb-6 border border-cyan-500/20 group-hover:scale-110 transition-transform duration-500">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-cyan-400">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                  </svg>
-                </div>
-                <h3 className="text-2xl font-bold mb-3 text-white/90">Sub-millisecond Onsets</h3>
-                <p className="text-neutral-300 leading-relaxed font-light">
-                  Our proprietary Librosa pipeline detects syllables and plosives with hyper-accuracy, keeping your drums locked on grid.
-                </p>
-              </div>
-
-              {/* Feature 3 */}
-              <div className="p-6 sm:p-8 rounded-3xl bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] transition-all duration-500 group">
-                <div className="w-14 h-14 rounded-2xl bg-purple-500/10 flex items-center justify-center mb-6 border border-purple-500/20 group-hover:scale-110 transition-transform duration-500">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-purple-400">
-                    <path d="M9 18V5l12-2v13" />
-                    <circle cx="6" cy="18" r="3" />
-                    <circle cx="18" cy="16" r="3" />
-                  </svg>
-                </div>
-                <h3 className="text-2xl font-bold mb-3 text-white/90">Instant Rendering</h3>
-                <p className="text-neutral-300 leading-relaxed font-light">
-                  Download crisp 808s and hi-hats mapped perfectly to your flow, ready to drop straight into Ableton or FL Studio.
-                </p>
-              </div>
+              ))}
             </div>
           </section>
         </main>
 
-        {/* Footer */}
-        <footer className="border-t border-white/5 py-12 text-center relative z-10 bg-black">
-          <div className="flex items-center justify-center gap-2 mb-4 opacity-50">
-            <div className="w-5 h-5 rounded-md bg-gradient-to-tr from-indigo-500 to-cyan-400 flex items-center justify-center">
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M6 3v18" />
-                <path d="M12 7v10" />
-                <path d="M18 10v4" />
-              </svg>
-            </div>
-            <span className="font-bold text-lg tracking-tight">FlowBeat</span>
-          </div>
-          <p className="text-neutral-500 text-sm">© 2026 FlowBeat Inc. All rights reserved.</p>
-        </footer>
+        <Footer />
       </div>
     )
   }
@@ -138,28 +116,6 @@ export default async function Home() {
   return (
     <div className="min-h-screen bg-black text-white selection:bg-white/20 selection:text-white font-sans flex flex-col overflow-x-hidden">
       <div className="fixed inset-0 bg-grid-white/[0.02] bg-[size:50px_50px]" />
-
-      {/* Navigation */}
-      <nav className="fixed top-0 w-full border-b border-white/5 bg-black/50 backdrop-blur-xl z-50 transition-all duration-300">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 sm:h-20 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3 group cursor-pointer min-w-0">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-500 to-cyan-400 flex items-center justify-center transform group-hover:scale-105 transition-all duration-300 shadow-[0_0_20px_rgba(99,102,241,0.3)]">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M6 3v18" />
-                <path d="M12 7v10" />
-                <path d="M18 10v4" />
-              </svg>
-            </div>
-            <span className="font-bold text-xl tracking-tight text-white/90 group-hover:text-white transition-colors">FlowBeat</span>
-          </div>
-          <div className="flex items-center gap-3 sm:gap-4 min-w-0">
-            <div className="hidden sm:block text-sm text-neutral-400 truncate">
-              Welcome back, <span className="text-white/80 font-medium">{session.user.name || session.user.email}</span>
-            </div>
-            <SignOutButton />
-          </div>
-        </div>
-      </nav>
 
       <main className="flex-grow pt-24 sm:pt-32 pb-20 relative z-10 w-full max-w-7xl mx-auto px-4 sm:px-6">
         <div className="mb-8 sm:mb-12">
@@ -179,7 +135,7 @@ export default async function Home() {
                     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
                   </svg>
                 </div>
-                <h2 className="text-2xl font-bold">New Session</h2>
+                <h2 className="text-2xl font-bold">New track</h2>
               </div>
               <UploadWidget />
             </div>
@@ -196,13 +152,17 @@ export default async function Home() {
                     <circle cx="18" cy="16" r="3" />
                   </svg>
                 </div>
-                <h2 className="text-2xl font-bold">Your Tracks</h2>
+                <h2 className="text-2xl font-bold">Your tracks</h2>
               </div>
 
               {jobs.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-[300px] text-center border-2 border-dashed border-white/5 rounded-2xl bg-white/[0.01]">
-                  <p className="text-neutral-500 mb-2">No tracks generated yet.</p>
-                  <p className="text-sm text-neutral-600">Upload an acapella to get started.</p>
+                <div className="flex flex-col items-center justify-center h-[300px] text-center border-2 border-dashed border-white/10 rounded-2xl bg-white/[0.01] px-6">
+                  <p className="text-neutral-300 mb-4">No tracks yet — start one with the panel on the left.</p>
+                  <ol className="text-sm text-neutral-400 flex flex-col sm:flex-row gap-2 sm:gap-4">
+                    <li><span className="text-indigo-300 font-medium">1.</span> Paste a URL or drop audio</li>
+                    <li><span className="text-indigo-300 font-medium">2.</span> We separate &amp; detect onsets</li>
+                    <li><span className="text-indigo-300 font-medium">3.</span> Play back the percussion</li>
+                  </ol>
                 </div>
               ) : (
                 <JobList initialJobs={jobs} />
@@ -211,6 +171,8 @@ export default async function Home() {
           </div>
         </div>
       </main>
+
+      <Footer />
     </div>
   )
 }

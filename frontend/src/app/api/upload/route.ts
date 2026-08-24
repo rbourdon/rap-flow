@@ -2,6 +2,7 @@ import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
 import { NextResponse } from 'next/server';
 import { auth } from '@/lib/auth';
 import { headers } from 'next/headers';
+import { ALLOWED_AUDIO_CONTENT_TYPES, MAX_UPLOAD_BYTES } from '@/lib/upload';
 
 export async function POST(request: Request): Promise<NextResponse> {
   const body = (await request.json()) as HandleUploadBody;
@@ -20,7 +21,8 @@ export async function POST(request: Request): Promise<NextResponse> {
         }
 
         return {
-          allowedContentTypes: ['audio/mpeg', 'audio/wav', 'audio/flac', 'audio/x-wav'],
+          allowedContentTypes: ALLOWED_AUDIO_CONTENT_TYPES,
+          maximumSizeInBytes: MAX_UPLOAD_BYTES,
           tokenPayload: JSON.stringify({
             userId: session.user.id
           }),

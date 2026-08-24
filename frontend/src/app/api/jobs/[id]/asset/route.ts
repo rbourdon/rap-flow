@@ -8,13 +8,26 @@ const ASSET_FIELDS = {
   events: 'eventsBlobUrl',
   perc: 'percBlobUrl',
   inst: 'instBlobUrl',
+  midi: 'midBlobUrl',
+  mixOpus: 'mixOpusBlobUrl',
+  percOpus: 'percOpusBlobUrl',
+  instOpus: 'instOpusBlobUrl',
 } as const;
 
 type AssetType = keyof typeof ASSET_FIELDS;
 
 function isAssetType(value: string | null): value is AssetType {
-  return value === 'mix' || value === 'events' || value === 'perc' || value === 'inst';
+  return value != null && Object.prototype.hasOwnProperty.call(ASSET_FIELDS, value);
 }
+
+// WAV/MIDI assets are downloads (Content-Disposition: attachment); Opus assets
+// are streamed for playback so they must not be forced as downloads.
+const DOWNLOAD_FILENAMES: Partial<Record<AssetType, string>> = {
+  mix: 'mix.wav',
+  perc: 'percussion.wav',
+  inst: 'instrumental.wav',
+  midi: 'beat.mid',
+};
 
 // Proxies reads of the job's result files stored in Vercel Blob. The blobs
 // are uploaded with `private` access (required by stores configured for
@@ -71,10 +84,11 @@ export async function GET(
   if (contentType) responseHeaders.set('content-type', contentType);
   const contentLength = blobRes.headers.get('content-length');
   if (contentLength) responseHeaders.set('content-length', contentLength);
-  if (type === 'mix') {
+  const downloadName = DOWNLOAD_FILENAMES[type];
+  if (downloadName) {
     responseHeaders.set(
       'content-disposition',
-      `attachment; filename="${id}.wav"`
+      `attachment; filename="${id}-${downloadName}"`
     );
   }
 
