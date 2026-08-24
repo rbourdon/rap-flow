@@ -28,9 +28,35 @@ image = modal.Image.debian_slim(python_version="3.12") \
     ) \
     .pip_install(
         "yt-dlp", f"bgutil-ytdlp-pot-provider=={BGUTIL_VERSION}", "ffmpeg-python", "demucs", "librosa",
-        "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests"
+        "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests", "scipy"
     ) \
-    .add_local_python_source("pipeline", "workflow")
+    .env({"KIT_DIR": "/root/kits/default"}) \
+    .add_local_dir("kits", "/root/kits") \
+    .add_local_python_source("pipeline", "workflow", "rhythm", "sampler")
+
+# Isolated image for the GrooVAE (tap2drum) groove stage. Magenta pins an old
+# TensorFlow that conflicts with the demucs/torch worker image above, so the
+# groove stage runs in its own image with Magenta/note-seq and the checkpoint
+# baked in at build time. None of these dependencies leak into the main worker
+# image. The checkpoint is fetched once during the build.
+GROOVE_CKPT_URL = (
+    "https://storage.googleapis.com/magentadata/models/music_vae/checkpoints/"
+    "groovae_2bar_tap_fixed_velocity.tar"
+)
+groove_image = modal.Image.debian_slim(python_version="3.10") \
+    .apt_install("ffmpeg", "curl", "libsndfile1") \
+    .pip_install(
+        "magenta", "note-seq", "librosa", "soundfile", "numpy", "scipy",
+        "mido", "pyloudnorm", "requests"
+    ) \
+    .run_commands(
+        "mkdir -p /models",
+        f"curl -fsSL {GROOVE_CKPT_URL} -o /models/groovae_2bar_tap_fixed_velocity.tar",
+    ) \
+    .env({"GROOVE_CKPT": "/models/groovae_2bar_tap_fixed_velocity.tar"}) \
+    .add_local_python_source(
+        "pipeline", "workflow", "rhythm", "sampler", "groove", "groovae"
+    )
 
 # Demucs model weights, cached across runs.
 volume = modal.Volume.from_name("demucs-models", create_if_missing=True)
@@ -227,6 +253,32 @@ def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
     return res
 
 
+@app.function(image=groove_image, volumes=_ARTIFACT_MOUNT, timeout=900,
+              retries=1, secrets=_SECRETS)
+def stage_groove(job_id: str, source_url: str, params: dict, force: bool,
+                 callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
+    """GrooVAE (tap2drum) drum-score stage, in its own Magenta image.
+
+    Falls back to a heuristic drum score inside ``workflow.stage_groove`` if
+    Magenta is unavailable or fails, so this stage never fails the job; any
+    fallback surfaces a warning in the stage state.
+    """
+    artifacts.reload()
+    _stage_start(job_id, "groove", callback_url, hmac_secret)
+    res = workflow.stage_groove(ARTIFACTS_ROOT, source_url, params, force=force)
+    artifacts.commit()
+    _post_callback({
+        "jobId": job_id,
+        "status": "PROCESSING",
+        "stage": workflow.STAGE_LABELS["groove"],
+        "stageKey": "groove",
+        "stageState": "REUSED" if res.get("reused") else "COMPLETED",
+        "reused": bool(res.get("reused")),
+        **({"warning": res["warning"]} if res.get("warning") else {}),
+    }, callback_url, hmac_secret, timeout=5)
+    return res
+
+
 @app.function(image=image, volumes=_ARTIFACT_MOUNT, timeout=600,
               retries=1, secrets=_SECRETS)
 def stage_render(job_id: str, source_url: str, params: dict, force: bool,
@@ -315,6 +367,7 @@ _STAGE_FUNCS = {
     "ingest": stage_ingest,
     "separate": stage_separate,
     "detect": stage_detect,
+    "groove": stage_groove,
     "render": stage_render,
     "finalize": stage_finalize,
 }

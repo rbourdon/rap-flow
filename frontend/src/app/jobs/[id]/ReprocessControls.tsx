@@ -14,7 +14,8 @@ const REPROCESSABLE: { stage: WorkflowStage; label: string; hint: string }[] = [
   { stage: 'ingest', label: 'Re-download source', hint: 're-fetches the audio' },
   { stage: 'separate', label: 'Re-separate stems', hint: 'reuses the download' },
   { stage: 'detect', label: 'Re-analyze syllables', hint: 'reuses the stems' },
-  { stage: 'render', label: 'Re-synthesize beats', hint: 'reuses stems & syllables' },
+  { stage: 'groove', label: 'Re-imagine drums', hint: 'reuses stems & syllables' },
+  { stage: 'render', label: 'Re-render beats', hint: 'reuses the drum score' },
 ]
 
 export function ReprocessControls({ jobId }: { jobId: string }) {

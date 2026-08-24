@@ -35,7 +35,7 @@ import pipeline
 
 
 # Machine-readable stage identifiers, in execution order.
-STAGES = ["ingest", "separate", "detect", "render", "finalize"]
+STAGES = ["ingest", "separate", "detect", "groove", "render", "finalize"]
 STAGE_INDEX = {name: i for i, name in enumerate(STAGES)}
 
 # Human-readable labels surfaced to the UI progress tracker. These must stay in
@@ -44,6 +44,7 @@ STAGE_LABELS = {
     "ingest": "Downloading Audio",
     "separate": "Separating Vocals",
     "detect": "Analyzing Syllables",
+    "groove": "Imagining drums",
     "render": "Synthesizing Beats",
     "finalize": "Saving Results",
 }
@@ -54,11 +55,13 @@ DEFAULT_ARTIFACTS_ROOT = os.environ.get("RAP_FLOW_ARTIFACTS", "/artifacts")
 
 # Parameter keys that influence stem separation (and therefore the stems cache).
 SEPARATE_PARAM_KEYS = ["drums_duck_db"]
+# Parameter keys that influence the groove (drum-score) stage.
+GROOVE_PARAM_KEYS = ["groove_enabled", "groove_temperature"]
 # Parameter keys that influence the percussion render (and therefore the render
 # cache). Reprocessing with any of these changed produces a fresh cache key, so
 # a re-render never returns a stale result.
 RENDER_PARAM_KEYS = [
-    "quantize_strength",
+    "kit",
     "duck_floor",
     "duck_release_ms",
     "duck_band_limited",
@@ -149,9 +152,24 @@ def stems_dir(root: str, input_hash: str, params: dict) -> str:
     return os.path.join(root, "inputs", _stems_key(input_hash, params))
 
 
+def _groove_key(input_hash: str, params: dict) -> str:
+    sig = (
+        _params_signature(params, SEPARATE_PARAM_KEYS)
+        + "|"
+        + _params_signature(params, GROOVE_PARAM_KEYS)
+    )
+    return _sha256_text(input_hash + "|" + sig)
+
+
+def groove_dir(root: str, input_hash: str, params: dict) -> str:
+    return os.path.join(root, "grooves", _groove_key(input_hash, params))
+
+
 def _render_key(input_hash: str, params: dict) -> str:
     sig = (
         _params_signature(params, SEPARATE_PARAM_KEYS)
+        + "|"
+        + _params_signature(params, GROOVE_PARAM_KEYS)
         + "|"
         + _params_signature(params, RENDER_PARAM_KEYS)
     )
@@ -295,13 +313,73 @@ def stage_detect(root: str, source_url: str, params: dict = None,
     }
 
 
+def stage_groove(root: str, source_url: str, params: dict = None,
+                 force: bool = False) -> dict:
+    """Turn syllable events into a drum score via GrooVAE -> drum_score.json.
+
+    Runs the ``groove`` (tap2drum) decision layer. On Modal this stage runs in a
+    dedicated Magenta image; the Magenta call is isolated in :mod:`groovae` and
+    imported lazily by :mod:`groove`, which falls back to a heuristic drum score
+    if the model is unavailable or fails - so a job never fails because of
+    Magenta. The score is the source of truth for both MIDI export and sample
+    rendering.
+    """
+    import groove as groove_mod
+
+    params = params or {}
+    input_wav = source_input_path(root, source_url)
+    if not os.path.exists(input_wav):
+        raise pipeline.IngestError(
+            "MISSING_ARTIFACT: input.wav not found; run the 'ingest' stage first."
+        )
+    input_hash = _sha256_file(input_wav)
+    stems = stems_dir(root, input_hash, params)
+    instrumental = os.path.join(stems, "instrumental.wav")
+    events_path = os.path.join(stems, "events.json")
+    for p, stage in ((instrumental, "separate"), (events_path, "detect")):
+        if not os.path.exists(p):
+            raise pipeline.IngestError(
+                f"MISSING_ARTIFACT: {os.path.basename(p)} not found; "
+                f"run the '{stage}' stage first."
+            )
+
+    out_dir = groove_dir(root, input_hash, params)
+    os.makedirs(out_dir, exist_ok=True)
+    score_path = os.path.join(out_dir, "drum_score.json")
+
+    if not force and os.path.exists(score_path):
+        return {
+            "input_hash": input_hash,
+            "drum_score_path": score_path,
+            "reused": True,
+        }
+
+    with open(events_path) as f:
+        events = json.load(f)
+
+    score = groove_mod.generate_drum_score(
+        events, instrumental,
+        temperature=params.get("groove_temperature"),
+        enabled=params.get("groove_enabled"),
+    )
+    with open(score_path, "w") as f:
+        json.dump(score, f)
+    return {
+        "input_hash": input_hash,
+        "drum_score_path": score_path,
+        "model_used": score.get("model_used"),
+        "warning": score.get("warning"),
+        "reused": False,
+    }
+
+
 def stage_render(root: str, source_url: str, params: dict = None,
                  force: bool = False) -> dict:
-    """Render the percussion mix from events + stems (cache-aware).
+    """Render the percussion mix from the drum score + stems (cache-aware).
 
-    The render cache key incorporates the render parameters, so reprocessing a
-    job with different ducking/quantization settings produces a fresh key and
-    never returns a stale mix, while the upstream stems/events are reused.
+    The render cache key incorporates the groove and render parameters, so
+    reprocessing a job with different settings produces a fresh key and never
+    returns a stale mix, while the upstream stems/events/score are reused.
     """
     params = params or {}
     input_wav = source_input_path(root, source_url)
@@ -312,17 +390,17 @@ def stage_render(root: str, source_url: str, params: dict = None,
     input_hash = _sha256_file(input_wav)
     stems = stems_dir(root, input_hash, params)
     instrumental = os.path.join(stems, "instrumental.wav")
-    drums = os.path.join(stems, "drums.wav")
     events_path = os.path.join(stems, "events.json")
-    for p, stage in ((instrumental, "separate"), (events_path, "detect")):
+    score_path = os.path.join(groove_dir(root, input_hash, params), "drum_score.json")
+    for p, stage in ((instrumental, "separate"), (score_path, "groove")):
         if not os.path.exists(p):
             raise pipeline.IngestError(
                 f"MISSING_ARTIFACT: {os.path.basename(p)} not found; "
                 f"run the '{stage}' stage first."
             )
 
-    with open(events_path) as f:
-        events = json.load(f)
+    with open(score_path) as f:
+        drum_score = json.load(f)
 
     out_dir = render_dir(root, input_hash, params)
     os.makedirs(out_dir, exist_ok=True)
@@ -345,11 +423,12 @@ def stage_render(root: str, source_url: str, params: dict = None,
         }
 
     render_kwargs = _filter_params(params, RENDER_PARAM_KEYS)
-    mix_out, midi_out, perc_out, inst_out = pipeline.render_percussion(
-        events,
+    kit_dir = render_kwargs.pop("kit", None)
+    mix_out, midi_out, perc_out, inst_out = pipeline.sample_render(
+        drum_score,
         instrumental,
         mix_wav,
-        drums_wav=drums if os.path.exists(drums) else None,
+        kit_dir=kit_dir,
         **render_kwargs,
     )
     return {
@@ -390,12 +469,13 @@ def resolve_render_outputs(root: str, source_url: str, params: dict = None) -> d
 
 # Stages that actually produce artifacts locally. ``finalize`` (blob upload) is
 # a deploy-only concern handled by ``worker.py``.
-_COMPUTE_STAGES = ["ingest", "separate", "detect", "render"]
+_COMPUTE_STAGES = ["ingest", "separate", "detect", "groove", "render"]
 
 _STAGE_FUNCS = {
     "ingest": stage_ingest,
     "separate": stage_separate,
     "detect": stage_detect,
+    "groove": stage_groove,
     "render": stage_render,
 }
 

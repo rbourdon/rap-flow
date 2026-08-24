@@ -12,6 +12,9 @@ interface StageState {
   state?: string;
   reused?: boolean;
   updatedAt?: string;
+  // Non-fatal warning surfaced for a stage (e.g. GrooVAE unavailable → the
+  // groove stage fell back to the heuristic drum mapping).
+  warning?: string;
 }
 
 interface JobProgressProps {
@@ -143,6 +146,9 @@ export function JobProgress({ status, stage, createdAt, stageStates }: JobProgre
                     {state === 'active' && <span className="ml-2 inline-block motion-safe:animate-bounce">…</span>}
                     {state === 'completed' && entry?.reused && (
                       <span className="ml-2 text-xs text-neutral-500">(reused)</span>
+                    )}
+                    {entry?.warning && (
+                      <span className="ml-2 text-xs text-amber-400" title={entry.warning}>⚠ fallback</span>
                     )}
                   </div>
                   {state === 'completed' && dur != null && dur >= 0 && (
