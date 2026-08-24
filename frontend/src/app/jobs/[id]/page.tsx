@@ -8,6 +8,7 @@ import { RetryButton } from './RetryButton'
 import { ReprocessControls } from './ReprocessControls'
 import { ClientDate } from '@/components/ClientDate'
 import { JobStatusTracker } from './JobStatusTracker'
+import { DeleteJobButton } from '@/components/DeleteJobButton'
 
 export default async function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth.api.getSession({
@@ -67,6 +68,10 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
               <RetryButton jobId={job.id} />
             </div>
           )}
+        </div>
+
+        <div className="mt-6 pt-6 border-t border-white/5">
+          <DeleteJobButton jobId={job.id} variant="full" redirectTo="/" />
         </div>
 
       </div>

@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { ClientDate } from '@/components/ClientDate'
+import { DeleteJobButton } from '@/components/DeleteJobButton'
 
 interface Job {
   id: string
@@ -38,16 +39,16 @@ export function JobList({ initialJobs }: { initialJobs: Job[] }) {
     <ul className="flex flex-col gap-3">
       {jobs.map((job) => (
         <li key={job.id} className="border border-white/5 rounded-xl bg-white/[0.02] shadow-sm hover:bg-white/[0.04] transition group">
-          <Link href={`/jobs/${job.id}`} className="p-4 flex justify-between items-center w-full">
-            <div>
+          <div className="p-3 sm:p-4 flex justify-between items-center gap-3">
+            <Link href={`/jobs/${job.id}`} className="flex-1 min-w-0">
               <span className="font-medium text-xs text-neutral-500 uppercase tracking-wide">
                 <ClientDate date={job.createdAt} />
               </span>
-              <div className="text-lg text-white/90 group-hover:text-white transition-colors truncate max-w-[200px]" title={job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}>
+              <div className="text-base sm:text-lg text-white/90 group-hover:text-white transition-colors truncate" title={job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}>
                 {job.sourceType === 'URL' ? (job.sourceUrl || '') : 'File Upload'}
               </div>
-            </div>
-            <div className="flex items-center gap-4">
+            </Link>
+            <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
               <span className={`px-2.5 py-1 text-xs font-bold rounded-md uppercase tracking-wider ${
                 job.status === 'COMPLETED' ? 'bg-green-500/20 text-green-400 border border-green-500/20' :
                 job.status === 'FAILED' ? 'bg-red-500/20 text-red-400 border border-red-500/20' :
@@ -55,8 +56,9 @@ export function JobList({ initialJobs }: { initialJobs: Job[] }) {
               }`}>
                 {job.status}
               </span>
+              <DeleteJobButton jobId={job.id} variant="icon" />
             </div>
-          </Link>
+          </div>
         </li>
       ))}
     </ul>
