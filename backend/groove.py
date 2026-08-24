@@ -229,7 +229,10 @@ def generate_drum_score(events, instrumental_wav, temperature=None,
     try:
         import groovae  # noqa: WPS433 - lazy so Magenta stays out of the main image
 
-        taps = build_tap_sequence(events)
+        # Group the raw onsets first so a dense syllable stream (30-60 ms apart)
+        # doesn't feed the model a wash of taps that becomes a wash of drums.
+        grouped = rhythm.group_events(events)
+        taps = build_tap_sequence(grouped)
         beat_times, tempo = rhythm.track_beats(instrumental_wav)
         if not tempo or tempo <= 0:
             tempo = 120.0
@@ -247,6 +250,9 @@ def generate_drum_score(events, instrumental_wav, temperature=None,
                 "drum_class": drum_class,
             })
         cleaned = _dedupe(cleaned)
+        # Plausibility gating: cap kick/snare per bar and enforce a per-class
+        # minimum inter-hit gap so the model can't emit a machine-gun wash.
+        cleaned = _gate_model_notes(cleaned, tempo)
         if not cleaned:
             raise RuntimeError("GrooVAE returned no usable notes")
         cleaned.sort(key=lambda n: n["t"])
@@ -274,4 +280,71 @@ def _dedupe(notes, eps=0.03):
             continue
         last_by_class[n["drum_class"]] = n["t"]
         kept.append(n)
+    return kept
+
+
+# Minimum time (seconds) between two hits of the same class on the model path.
+# Kicks/snares are spaced further apart than hats, which legitimately subdivide.
+_MODEL_MIN_GAP = {
+    "kick": 0.09,
+    "snare": 0.09,
+    "hat_closed": 0.05,
+    "hat_open": 0.08,
+}
+_MODEL_MIN_GAP_DEFAULT = 0.08
+
+# Per-4/4-bar caps for the dominant classes, mirroring the heuristic path.
+_MODEL_BAR_CAP = {"kick": 4, "snare": 2}
+
+
+def _gate_model_notes(notes, tempo):
+    """Gate GrooVAE output: per-class min gap + per-bar kick/snare caps.
+
+    The model can emit an implausibly dense stream of hits (especially after the
+    tempo rescale realigns windows). This mirrors the heuristic path's density
+    control so the drums read as a groove rather than a wash: hits of the same
+    class closer than a per-class minimum gap are dropped (keeping the louder
+    one), and kicks/snares are capped per 4/4 bar (weakest overflow removed).
+    """
+    if not notes:
+        return notes
+
+    ordered = sorted(notes, key=lambda n: (n["t"], -n["velocity"]))
+
+    # 1. Enforce a per-class minimum inter-hit gap, keeping the louder hit.
+    kept = []
+    last_kept = {}  # drum_class -> index into `kept`
+    for n in ordered:
+        cls = n["drum_class"]
+        gap = _MODEL_MIN_GAP.get(cls, _MODEL_MIN_GAP_DEFAULT)
+        prev_i = last_kept.get(cls)
+        if prev_i is not None and n["t"] - kept[prev_i]["t"] < gap:
+            # Too close: keep whichever is louder.
+            if n["velocity"] > kept[prev_i]["velocity"]:
+                kept[prev_i] = n
+            continue
+        last_kept[cls] = len(kept)
+        kept.append(n)
+
+    if tempo and tempo > 0:
+        bar_sec = 4.0 * 60.0 / float(tempo)
+    else:
+        bar_sec = None
+
+    # 2. Cap kicks/snares per bar, dropping the weakest overflow.
+    if bar_sec and bar_sec > 0:
+        bars = {}
+        for n in kept:
+            bars.setdefault(int(n["t"] // bar_sec), []).append(n)
+        drop = set()
+        for items in bars.values():
+            for cls, cap in _MODEL_BAR_CAP.items():
+                cls_notes = [n for n in items if n["drum_class"] == cls]
+                overflow = sorted(cls_notes, key=lambda x: x["velocity"])[
+                    :max(0, len(cls_notes) - cap)]
+                for n in overflow:
+                    drop.add(id(n))
+        kept = [n for n in kept if id(n) not in drop]
+
+    kept.sort(key=lambda n: n["t"])
     return kept

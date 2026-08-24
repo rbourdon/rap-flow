@@ -327,7 +327,7 @@ def detect_syllables(vocals_wav: str):
     voiced_mask = (periodicity > 0.2)[:len(rms)] if len(periodicity) else np.zeros(len(rms), bool)
     voiced_rms = rms[:len(voiced_mask)][voiced_mask]
     median_voiced_rms = float(np.median(voiced_rms)) if len(voiced_rms) else 0.0
-    rms_gate = 0.2 * median_voiced_rms
+    rms_gate = 0.25 * median_voiced_rms
     # Window of +/-25 ms around an onset, in 10 ms frames.
     rms_half_win = 2
 
@@ -348,8 +348,9 @@ def detect_syllables(vocals_wav: str):
         f0 = pitch[crepe_frame]
         per = periodicity[crepe_frame]
 
-        # Strength gate: drop the weakest normalized onsets.
-        if strength < 0.1:
+        # Strength gate: drop the weakest normalized onsets. These are usually
+        # separation artifacts / breaths that would become spurious taps.
+        if strength < 0.12:
             continue
 
         # RMS gate: drop onsets sitting in near-silence relative to the voiced
@@ -501,6 +502,18 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
     normalized_mix = mix * gain_linear
     normalized_perc = perc_track * gain_linear
     normalized_inst = ducked_inst * gain_linear
+
+    # Safety limiter / true-peak guard. Loudness-normalizing a drum layer on top
+    # of the bed can push peaks past 0 dBFS, which clips and adds crackle. If the
+    # mix exceeds the ceiling, pull the whole mix down by the overshoot (applied
+    # equally to the stems so their relationship is preserved) so nothing clips.
+    ceiling = 0.985
+    peak = float(np.max(np.abs(normalized_mix))) if normalized_mix.size else 0.0
+    if peak > ceiling:
+        limiter_gain = ceiling / peak
+        normalized_mix = normalized_mix * limiter_gain
+        normalized_perc = normalized_perc * limiter_gain
+        normalized_inst = normalized_inst * limiter_gain
 
     sf.write(output_mix_wav, normalized_mix, sr)
     sf.write(perc_only_path, normalized_perc, sr)

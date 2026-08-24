@@ -29,6 +29,12 @@ _STEPS_PER_QUARTER = 4
 _BEATS_PER_BAR = 4
 _BARS = 2
 
+# Magenta's MusicVAE decodes drum sequences at a fixed default tempo (120 QPM),
+# so the ``start_time`` values on the returned NoteSequence are in seconds *at
+# 120 BPM*, regardless of the track's real tempo. Decoded times must therefore
+# be rescaled to real seconds (see :func:`tap2drum`).
+_MODEL_QPM = 120.0
+
 _MODEL = None
 
 
@@ -78,8 +84,9 @@ def tap2drum(taps, tempo, temperature=0.5):
     ``taps`` is a list of ``{t, velocity}`` at raw onset times. The taps are
     sliced into consecutive 2-bar windows at ``tempo``, each window is run
     through GrooVAE, and the results are concatenated (with each window's notes
-    offset back to absolute time). Returns a list of ``{t, midi_note,
-    velocity}`` with the model's velocities and micro-timing.
+    rescaled from the model's fixed 120 BPM reference to real seconds and offset
+    back to absolute time). Returns a list of ``{t, midi_note, velocity}`` with
+    the model's velocities and micro-timing.
     """
     if not taps:
         return []
@@ -87,6 +94,9 @@ def tap2drum(taps, tempo, temperature=0.5):
     model = _load_model()
     qpm = float(tempo) if tempo and tempo > 0 else 120.0
     win = _window_seconds(qpm)
+    # The model always decodes at _MODEL_QPM, so its note times span
+    # _window_seconds(_MODEL_QPM) seconds; scale them into the real window.
+    time_scale = win / _window_seconds(_MODEL_QPM)
     last_t = max(tap["t"] for tap in taps)
 
     out = []
@@ -99,8 +109,14 @@ def tap2drum(taps, tempo, temperature=0.5):
                 drum_ns = _run_window(model, window_taps, qpm, start, end,
                                       temperature)
                 for note in drum_ns.notes:
+                    # Rescale the model's 120 BPM note time into real seconds,
+                    # then offset by the window start. Drop anything that falls
+                    # past the real window so consecutive windows don't overlap.
+                    rel_t = float(note.start_time) * time_scale
+                    if rel_t >= win:
+                        continue
                     out.append({
-                        "t": start + float(note.start_time),
+                        "t": start + rel_t,
                         "midi_note": int(note.pitch),
                         "velocity": int(note.velocity),
                     })
