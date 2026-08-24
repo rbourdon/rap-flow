@@ -1,51 +1,97 @@
-import React from 'react';
+'use client'
+
+import React, { useEffect, useState } from 'react';
+import {
+  WORKFLOW_STAGES,
+  STAGE_LABELS,
+  normalizeStage,
+  type WorkflowStage,
+} from '@/app/workflow-stages';
+
+interface StageState {
+  state?: string;
+  reused?: boolean;
+  updatedAt?: string;
+}
 
 interface JobProgressProps {
   status: string;
+  // Machine-readable stage id (e.g. "separate"). Legacy display-string values
+  // are tolerated via normalizeStage.
   stage: string | null;
+  createdAt?: Date | string | null;
+  stageStates?: Record<string, StageState> | null;
 }
 
-const STAGES = [
-  "Downloading Audio",
-  "Separating Vocals",
-  "Analyzing Syllables",
-  "Synthesizing Beats",
-  "Saving Results"
-];
+function formatSeconds(totalSeconds: number): string {
+  if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return '';
+  const s = Math.round(totalSeconds);
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  if (m > 0) return `${m}m ${rem}s`;
+  return `${rem}s`;
+}
 
-export function JobProgress({ status, stage }: JobProgressProps) {
-  // Determine the current stage index.
-  // If status is PENDING, index is 0.
-  // If status is COMPLETED, all stages are done.
-  // Otherwise, find the index of the current stage string.
-  let currentIndex = -1;
-
-  if (status === 'COMPLETED') {
-    currentIndex = STAGES.length;
-  } else if (status === 'PENDING') {
-    currentIndex = -1; // Wait for the first stage
-  } else if (status === 'PROCESSING') {
-    if (stage) {
-      currentIndex = STAGES.indexOf(stage);
-    } else {
-      currentIndex = 0;
+// Per-stage duration approximated from the durable stageStates timestamps:
+// a stage's duration is the gap between its completion time and the previous
+// stage's completion time (or the job's creation for the first stage).
+function computeStageDurations(
+  stageStates: Record<string, StageState> | null | undefined,
+  createdAt: Date | string | null | undefined,
+): Partial<Record<WorkflowStage, number>> {
+  const out: Partial<Record<WorkflowStage, number>> = {};
+  if (!stageStates) return out;
+  let prev = createdAt ? new Date(createdAt).getTime() : NaN;
+  for (const stage of WORKFLOW_STAGES) {
+    const entry = stageStates[stage];
+    if (!entry?.updatedAt) continue;
+    const t = new Date(entry.updatedAt).getTime();
+    if (Number.isFinite(prev) && Number.isFinite(t) && t >= prev) {
+      out[stage] = (t - prev) / 1000;
     }
-  } else if (status === 'FAILED') {
-    if (stage) {
-      currentIndex = STAGES.indexOf(stage);
-    } else {
-      currentIndex = 0; // Or whatever is appropriate for failed
-    }
+    prev = t;
   }
+  return out;
+}
+
+export function JobProgress({ status, stage, createdAt, stageStates }: JobProgressProps) {
+  const normalized = normalizeStage(stage);
+  const currentIndex =
+    status === 'COMPLETED'
+      ? WORKFLOW_STAGES.length
+      : status === 'PENDING'
+      ? -1
+      : normalized
+      ? WORKFLOW_STAGES.indexOf(normalized)
+      : 0;
+
+  const durations = computeStageDurations(stageStates, createdAt);
+
+  // Live elapsed timer while the job is in flight.
+  const isActive = status === 'PENDING' || status === 'PROCESSING';
+  const [elapsed, setElapsed] = useState<number | null>(null);
+  useEffect(() => {
+    if (!isActive || !createdAt) return;
+    const start = new Date(createdAt).getTime();
+    const tick = () => setElapsed((Date.now() - start) / 1000);
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [isActive, createdAt]);
 
   return (
     <div className="w-full max-w-md mx-auto py-8">
+      {isActive && elapsed != null && (
+        <p className="text-sm text-neutral-400 mb-6 text-center">
+          Elapsed: {formatSeconds(elapsed)}
+        </p>
+      )}
       <div className="relative">
         {/* The continuous vertical line behind nodes */}
         <div className="absolute left-4 top-4 bottom-4 w-0.5 bg-neutral-800" />
 
         <div className="flex flex-col space-y-6">
-          {STAGES.map((s, idx) => {
+          {WORKFLOW_STAGES.map((s, idx) => {
             let state: 'waiting' | 'active' | 'completed' | 'failed' = 'waiting';
 
             if (status === 'FAILED' && idx === currentIndex) {
@@ -55,6 +101,10 @@ export function JobProgress({ status, stage }: JobProgressProps) {
             } else if (idx === currentIndex && status !== 'FAILED') {
               state = 'active';
             }
+
+            const label = STAGE_LABELS[s];
+            const entry = stageStates?.[s];
+            const dur = durations[s];
 
             return (
               <div key={s} className="relative flex items-center gap-6">
@@ -68,7 +118,7 @@ export function JobProgress({ status, stage }: JobProgressProps) {
                   )}
                   {state === 'active' && (
                     <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center ring-4 ring-black">
-                      <span className="w-3 h-3 bg-white rounded-full animate-pulse" />
+                      <span className="w-3 h-3 bg-white rounded-full motion-safe:animate-pulse" />
                     </div>
                   )}
                   {state === 'waiting' && (
@@ -82,14 +132,22 @@ export function JobProgress({ status, stage }: JobProgressProps) {
                     </div>
                   )}
                 </div>
-                <div className={`text-base font-medium transition-colors duration-300 ${
-                  state === 'active' ? 'text-indigo-400' :
-                  state === 'completed' ? 'text-neutral-300' :
-                  state === 'failed' ? 'text-red-400' :
-                  'text-neutral-600'
-                }`}>
-                  {s}
-                  {state === 'active' && <span className="ml-2 inline-block animate-bounce">...</span>}
+                <div className="flex-1 flex items-center justify-between gap-3">
+                  <div className={`text-base font-medium transition-colors duration-300 ${
+                    state === 'active' ? 'text-indigo-400' :
+                    state === 'completed' ? 'text-neutral-300' :
+                    state === 'failed' ? 'text-red-400' :
+                    'text-neutral-500'
+                  }`}>
+                    {label}
+                    {state === 'active' && <span className="ml-2 inline-block motion-safe:animate-bounce">…</span>}
+                    {state === 'completed' && entry?.reused && (
+                      <span className="ml-2 text-xs text-neutral-500">(reused)</span>
+                    )}
+                  </div>
+                  {state === 'completed' && dur != null && dur >= 0 && (
+                    <span className="text-xs text-neutral-500 tabular-nums">{formatSeconds(dur)}</span>
+                  )}
                 </div>
               </div>
             );

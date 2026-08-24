@@ -61,7 +61,15 @@ export async function POST(
     if (data.status === 'PROCESSING') {
       await mergeStageState({
         status: 'PROCESSING',
-        stage: data.stage,
+        // Persist the machine-readable stage id (stageKey) so the UI can map it
+        // to a label via STAGE_LABELS. Fall back to `stage` for older workers.
+        stage: data.stageKey ?? data.stage,
+        // Source identity metadata (sent from the ingest stage). Only set fields
+        // that are present so a metadata-only callback doesn't clobber others.
+        ...(data.title != null ? { title: data.title } : {}),
+        ...(data.thumbnailUrl != null ? { thumbnailUrl: data.thumbnailUrl } : {}),
+        ...(data.durationSec != null ? { durationSec: data.durationSec } : {}),
+        ...(data.uploader != null ? { uploader: data.uploader } : {}),
       });
       return NextResponse.json({ success: true });
     } else if (data.status === 'COMPLETED' && !data.resultUrl) {
@@ -80,11 +88,17 @@ export async function POST(
     } else if (data.status === 'COMPLETED') {
       await mergeStageState({
         status: 'COMPLETED',
-        stage: data.stage,
+        stage: data.stageKey ?? data.stage,
         resultBlobUrl: data.resultUrl,
         eventsBlobUrl: data.eventsUrl,
         percBlobUrl: data.percUrl,
         instBlobUrl: data.instUrl,
+        // New (nullable) artifacts. Older workers omit these; leaving them
+        // undefined keeps the columns null and the UI falls back gracefully.
+        midBlobUrl: data.midUrl ?? undefined,
+        mixOpusBlobUrl: data.mixOpusUrl ?? undefined,
+        percOpusBlobUrl: data.percOpusUrl ?? undefined,
+        instOpusBlobUrl: data.instOpusUrl ?? undefined,
       });
     } else if (data.status === 'FAILED') {
       await mergeStageState({

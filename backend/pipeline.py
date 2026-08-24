@@ -63,6 +63,10 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
     parsed = urllib.parse.urlparse(input_url_or_path)
     is_url = parsed.scheme in ('http', 'https')
 
+    # Source metadata captured from yt-dlp's info_dict (title/thumbnail/etc.) so
+    # the frontend can give the job an identity. Empty for direct/local sources.
+    metadata: dict = {}
+
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_download = os.path.join(tmpdir, "downloaded")
 
@@ -159,6 +163,17 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
                         if duration and duration > max_duration:
                             raise IngestError(f"UNSUPPORTED_SOURCE: Audio source exceeds maximum duration of {max_duration} seconds ({duration}s).")
 
+                        # Capture identity metadata for the frontend. Guard each
+                        # field: not every extractor supplies all of them.
+                        metadata = {
+                            "title": info_dict.get("title"),
+                            "thumbnail": info_dict.get("thumbnail"),
+                            "duration": int(duration) if duration else None,
+                            "uploader": info_dict.get("uploader")
+                            or info_dict.get("channel")
+                            or info_dict.get("uploader_id"),
+                        }
+
                     ydl.download([input_url_or_path])
             except yt_dlp.utils.DownloadError as e:
                 raise IngestError(classify_yt_dlp_error(e))
@@ -175,7 +190,7 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
         ]
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    return output_path
+    return {"output_path": output_path, "metadata": metadata}
 
 def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0):
     """

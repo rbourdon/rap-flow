@@ -95,6 +95,27 @@ def _upload_to_blob(local_path: str, pathname: str, token: str, content_type: st
     return res.json().get("url", "")
 
 
+def _transcode_to_opus(src_wav: str, dst_ogg: str) -> str:
+    """Transcode a WAV to Opus-in-Ogg for lightweight streaming playback.
+
+    The WAVs remain the download artifacts; these compressed copies are what the
+    player streams so a completed job doesn't pull 100+ MB of WAV. Returns the
+    output path on success or None if ffmpeg fails (playback then falls back to
+    the WAV).
+    """
+    import subprocess
+
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", src_wav, "-c:a", "libopus", "-b:a", "128k", dst_ogg],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return dst_ogg
+    except (subprocess.CalledProcessError, OSError) as e:
+        print(f"Opus transcode failed for {src_wav}: {e}")
+        return None
+
+
 def _post_callback(payload: dict, callback_url: str, hmac_secret: str, timeout: int = 10):
     """Sign and POST a status/progress payload to the frontend webhook."""
     import requests
@@ -157,6 +178,24 @@ def stage_ingest(job_id: str, source_url: str, params: dict, force: bool,
         yt_proxy=os.environ.get("YT_PROXY"),
     )
     artifacts.commit()
+    # Forward captured source metadata (title/thumbnail/duration/uploader) so
+    # the frontend can give the job an identity. Best-effort: only sent when we
+    # actually captured something (URL sources; uploads carry no metadata here).
+    meta = res.get("metadata") or {}
+    meta_payload = {
+        k: v for k, v in {
+            "title": meta.get("title"),
+            "thumbnailUrl": meta.get("thumbnail"),
+            "durationSec": meta.get("duration"),
+            "uploader": meta.get("uploader"),
+        }.items() if v is not None
+    }
+    if meta_payload:
+        _post_callback({
+            "jobId": job_id,
+            "status": "PROCESSING",
+            **meta_payload,
+        }, callback_url, hmac_secret, timeout=5)
     _stage_done(job_id, "ingest", res.get("reused"), callback_url, hmac_secret)
     return res
 
@@ -217,12 +256,40 @@ def stage_finalize(job_id: str, source_url: str, params: dict, force: bool,
         events_url = _upload_to_blob(out["events_path"], f"events_{job_id}.json", token, "application/json")
         perc_url = _upload_to_blob(out["perc_wav"], f"perc_{job_id}.wav", token, "audio/wav")
         inst_url = _upload_to_blob(out["inst_wav"], f"inst_{job_id}.wav", token, "audio/wav")
+
+        # The MIDI file was previously generated then discarded; upload it so the
+        # user can download it alongside the audio stems.
+        mid_url = None
+        midi_path = out.get("midi_path")
+        if midi_path and os.path.exists(midi_path):
+            mid_url = _upload_to_blob(midi_path, f"beat_{job_id}.mid", token, "audio/midi")
+
+        # Compressed Opus playback copies. Transcode into the render dir, then
+        # upload. Any failure leaves the URL None and playback falls back to WAV.
+        render_dir = os.path.dirname(out["mix_wav"])
+        mix_opus_url = perc_opus_url = inst_opus_url = None
+        for wav_key, name, setter in (
+            ("mix_wav", "mix", "mix"),
+            ("perc_wav", "perc", "perc"),
+            ("inst_wav", "inst", "inst"),
+        ):
+            ogg = _transcode_to_opus(out[wav_key], os.path.join(render_dir, f"{name}.opus.ogg"))
+            if ogg:
+                url = _upload_to_blob(ogg, f"{name}_{job_id}.opus.ogg", token, "audio/ogg")
+                if setter == "mix":
+                    mix_opus_url = url
+                elif setter == "perc":
+                    perc_opus_url = url
+                else:
+                    inst_opus_url = url
     else:
         print("Warning: BLOB_READ_WRITE_TOKEN not provided, using dummy URLs.")
         mix_url = "https://dummy.blob.vercel-storage.com/mix.wav"
         events_url = "https://dummy.blob.vercel-storage.com/events.json"
         perc_url = "https://dummy.blob.vercel-storage.com/perc.wav"
         inst_url = "https://dummy.blob.vercel-storage.com/inst.wav"
+        mid_url = None
+        mix_opus_url = perc_opus_url = inst_opus_url = None
 
     _post_callback({
         "jobId": job_id,
@@ -234,6 +301,10 @@ def stage_finalize(job_id: str, source_url: str, params: dict, force: bool,
         "eventsUrl": events_url,
         "percUrl": perc_url,
         "instUrl": inst_url,
+        "midUrl": mid_url,
+        "mixOpusUrl": mix_opus_url,
+        "percOpusUrl": perc_opus_url,
+        "instOpusUrl": inst_opus_url,
     }, callback_url, hmac_secret)
 
     return {"mix_url": mix_url, "reused": False}

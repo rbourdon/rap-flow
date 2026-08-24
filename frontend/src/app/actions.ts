@@ -59,7 +59,7 @@ export async function createJobFromUrl(sourceUrl: string) {
   return job.id;
 }
 
-export async function createJobFromBlob(blobUrl: string) {
+export async function createJobFromBlob(blobUrl: string, title?: string) {
   const session = await auth.api.getSession({
     headers: await headers()
   });
@@ -73,6 +73,9 @@ export async function createJobFromBlob(blobUrl: string) {
       userId: session.user.id,
       sourceType: 'UPLOAD',
       inputBlobUrl: blobUrl,
+      // Use the original filename as the title for uploads (URL jobs get their
+      // title from yt-dlp metadata during ingest).
+      title: title || null,
       status: 'PENDING',
     }
   });
