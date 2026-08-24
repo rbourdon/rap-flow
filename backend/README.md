@@ -12,13 +12,15 @@ The pipeline is a short, linear DAG that is split into independent, cache-aware
 stages coordinated by a lightweight Modal-native orchestrator:
 
 ```
-ingest -> separate -> detect -> render -> finalize
+ingest -> separate -> detect -> groove -> render -> finalize
 ```
 
 - **Per-stage workers.** Each stage is its own Modal function (`worker.py`) with
-  a resource profile suited to its work: `ingest` and `render` run on cheap CPU
-  containers, while `separate` (Demucs) and `detect` (torchcrepe) get a GPU.
-  Every stage has its own timeout and is retried independently.
+  a resource profile suited to its work: `ingest`, `groove` and `render` run on
+  cheap CPU containers, while `separate` (Demucs) and `detect` (torchcrepe) get a
+  GPU. The `groove` stage additionally runs in its **own image** with Magenta
+  baked in (see below), isolated from the demucs/torch worker image. Every stage
+  has its own timeout and is retried independently.
 - **Durable artifacts + download reuse.** Every stage writes its outputs to a
   persistent Modal Volume (`rap-flow-artifacts`, mounted at `/artifacts`) under a
   key derived from the *content of its inputs* (see `workflow.py`). The ingest
@@ -42,40 +44,61 @@ function) and `cli.py` (run locally, in-process).
 
 ## Percussion synthesis
 
-Detected syllable onsets are turned into a drum pattern that locks to the
-track's own groove rather than following the vocal melody:
+Percussion is generated in **two stages** — a *decision* layer that decides which
+drum plays when, and a *sound* layer that plays real samples — so the vocal
+onsets stay the rhythmic source of truth and the drums are actual recorded (or
+high-quality synthesized) one-shots rather than per-syllable beeps.
 
-- **Beat-tracked grid + soft quantization.** The instrumental stem is
-  beat-tracked (`librosa.beat.beat_track`) and a 16th-note grid is built by
-  interpolating between the actual beat times, so it tolerates tempo drift.
-  Each onset is soft-quantized `QUANTIZE_STRENGTH` of the way (default `0.65`)
-  toward the nearest 16th gridline (snapping fully within 15 ms), removing the
-  jitter that fought the on-grid instrumental. If beat tracking is degenerate
-  (< 8 beats) the render falls back to unquantized times.
-- **Metrical role assignment.** Roles come from the quantized metrical position,
-  not vocal pitch. After estimating the 4/4 downbeat phase, on-beat hits on
-  beats 1 & 3 become kicks (MIDI 36), on beats 2 & 4 snares (MIDI 38), and 8th
-  /16th subdivisions become closed hats (MIDI 42). Unvoiced events always map to
-  hats. Density is gated per bar (at most 4 kicks / 2 snares; weakest overflow
-  demoted to hats), and empty grid positions stay as rests.
-- **Fixed-pitch kit sampled from the track.** When the separated drum stem
-  yields enough transients, one-shots are sliced from it, scored by isolation
-  (a clean >250 ms decay) and loudness, and bucketed by spectral centroid; the
-  top few candidates per bucket are cycled at render time to avoid machine-gun
-  repetition. Otherwise the kit is synthesized. Either way the kit is tuned
-  **once** to the track's median voiced vocal f0 (octave-folded into each drum's
-  register). Any repitching uses resampling (varispeed), never a phase vocoder,
-  so drum transients stay crisp.
-- **Band-limited ducking.** Kick and snare hits (not hats) duck the
-  instrumental. The bed is split with a ~400 Hz Linkwitz-Riley crossover and
-  only the low band is ducked, so the mix doesn't pump. Each dip has a 5 ms
-  attack ramp and a linear release (default 80 ms) to a floor of `0.7`
-  (~ -3 dB), avoiding the zipper clicks and constant pumping of the old
-  full-band, instantaneous sidechain. Set `DUCK_BAND_LIMITED=0` for full-band
-  ducking with the same gentle envelope.
-- **MIDI export.** The `.mid` file carries a real tempo meta message from the
-  tracked BPM and uses proper `ticks_per_beat` math, so it imports on-grid into
-  a DAW with the 36/38/42 drum notes.
+### 1. `groove` — syllable events → drum score (GrooVAE tap2drum)
+
+- **GrooVAE tap2drum.** The vocal onsets are turned into a monophonic *tap*
+  sequence at their **raw onset times** (velocity from onset strength — no global
+  quantization, so the drums stay locked to the voice), then fed in 2-bar windows
+  through Magenta's `groovae_2bar_tap_fixed_velocity` model. The model expands the
+  taps into a full 9-class drum performance (kick, snare, closed/open hat, three
+  toms, crash, ride) with per-note velocity and micro-timing. The instrumental is
+  beat-tracked (`librosa.beat.beat_track`) for tempo only, to size the windows.
+- **Isolated environment.** Magenta pins an old TensorFlow that conflicts with the
+  demucs/torch worker image, so the model call lives in `groovae.py` and runs in a
+  **separate Modal function with its own image** (Magenta + note-seq, checkpoint
+  baked in at build time). None of those dependencies touch the main worker image;
+  `groove.py` imports `groovae` lazily.
+- **Heuristic fallback.** If the model is disabled (`GROOVE_ENABLED=0`),
+  unavailable (e.g. Magenta not installed locally), or fails for any reason, a
+  metrical heuristic maps the onsets to drums instead — kicks on beats 1 & 3,
+  snares on 2 & 4, hats on the subdivisions, open hats on the off-beats, and a
+  crash at phrase starts — so a job **never fails because of Magenta**. The
+  fallback is surfaced as a non-fatal warning in the stage state.
+- **Output.** The drum score (`{t, midi_note, velocity, drum_class}` list plus
+  tempo) is saved as `drum_score.json` and is the single source of truth for both
+  MIDI export and sample rendering. `GROOVE_TEMPERATURE` (default `0.5`) controls
+  the model's sampling temperature.
+
+### 2. `render` — drum score → audio (real-sample sampler)
+
+- **Velocity-layered, round-robin sampler.** `sampler.py` plays a kit of real
+  one-shots laid out as `kits/<kit>/<drum_class>/v<layer>_rr<variant>.wav` (see
+  `kits/README.md`). The MIDI velocity picks the nearest velocity layer and is
+  fine-scaled with gain; a single-layer class additionally darkens soft hits with
+  a gentle lowpass. Round-robin variants are cycled and never repeated twice in a
+  row; a single-variant class gets a ±3% random varispeed instead, so no two
+  consecutive hits are bit-identical. Samples play at **native pitch** — there is
+  no f0-tuning or pitch-shifting anywhere in the drum path.
+- **Choke groups.** A `hat_closed` or `kick` event chokes any still-ringing
+  `hat_open` with a fast 10 ms tail fade.
+- **Bundled kit.** `kits/default/` ships CC0 synthesized placeholder one-shots so
+  the pipeline works out of the box (2 velocity layers × 2 round-robins for
+  kick/snare/hat_closed, one shot for the rest). Drop a real kit into any
+  conforming folder and select it with `KIT_DIR` / `--kit` — no code changes
+  needed. Regenerate the placeholders with `python kits/generate_default_kit.py`.
+- **Band-limited ducking.** Kick and snare hits (not hats) duck the instrumental.
+  The bed is split with a ~400 Hz Linkwitz-Riley crossover and only the low band
+  is ducked, so the mix doesn't pump. Each dip has a 5 ms attack ramp and a linear
+  release (default 80 ms) to a floor of `0.7` (~ -3 dB). Set `DUCK_BAND_LIMITED=0`
+  for full-band ducking with the same gentle envelope.
+- **MIDI export.** The `.mid` file is built from the drum score with a real tempo
+  meta message and proper `ticks_per_beat` math, so it imports on-grid into a DAW
+  with the full set of 9-class drum notes and per-note velocities.
 
 
 ## YouTube ingestion & the "HTTP Error 403: Forbidden" problem
@@ -118,7 +141,9 @@ These are read from the environment (in Modal, set them as secrets on the
 | `YT_PLAYER_CLIENT` | Comma-separated override for the yt-dlp player clients (e.g. `tv,web_safari`). Leave unset to use yt-dlp's maintained defaults. |
 | `MAX_SOURCE_DURATION_SEC` | Maximum accepted source duration in seconds (default `900`). |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob token used to upload results. |
-| `QUANTIZE_STRENGTH` | How far each onset is pulled toward the nearest 16th gridline, 0-1 (default `0.65`). |
+| `GROOVE_ENABLED` | Run the GrooVAE tap2drum model for the drum score (default on); set `0`/`false` to force the heuristic drum mapping. |
+| `GROOVE_TEMPERATURE` | GrooVAE sampling temperature (default `0.5`). |
+| `KIT_DIR` | Path to the drum kit directory used by the sampler (default: the bundled `kits/default`). See `kits/README.md`. |
 | `DUCK_FLOOR` | Ducking floor gain applied under kick/snare hits (default `0.7`, ~ -3 dB). |
 | `DUCK_RELEASE_MS` | Ducking release time in milliseconds (default `80`). |
 | `DUCK_BAND_LIMITED` | Duck only the low band via a ~400 Hz crossover when truthy (default on); set `0`/`false` for full-band ducking. |
@@ -130,11 +155,20 @@ pip install -r requirements.txt
 python cli.py "https://youtu.be/VIDEO_ID" --outdir output
 ```
 
+Magenta is **not** in `requirements.txt` (it conflicts with the demucs/torch
+stack), so local runs automatically use the heuristic drum mapping. Pass
+`--no-groove` to force it explicitly, and `--kit /path/to/kit` to use a different
+drum kit:
+
+```bash
+python cli.py "https://youtu.be/VIDEO_ID" --outdir output --no-groove --kit kits/default
+```
+
 Intermediate artifacts are cached under `<outdir>/artifacts` (override with
 `--artifacts`), so re-running the same source reuses the download and stems. To
 force recomputation from a given stage while reusing everything before it, pass
-`--from-stage` (one of `ingest`, `separate`, `detect`, `render`), e.g. re-render
-without re-downloading or re-separating:
+`--from-stage` (one of `ingest`, `separate`, `detect`, `groove`, `render`), e.g.
+re-render without re-downloading or re-separating:
 
 ```bash
 python cli.py "https://youtu.be/VIDEO_ID" --outdir output --from-stage render

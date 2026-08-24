@@ -6,6 +6,7 @@ export const WORKFLOW_STAGES = [
   'ingest',
   'separate',
   'detect',
+  'groove',
   'render',
   'finalize',
 ] as const
@@ -20,6 +21,7 @@ export const STAGE_LABELS: Record<WorkflowStage, string> = {
   ingest: 'Downloading audio',
   separate: 'Separating stems',
   detect: 'Detecting onsets',
+  groove: 'Imagining drums',
   render: 'Rendering percussion',
   finalize: 'Saving results',
 }
@@ -29,6 +31,7 @@ export const STAGE_ACTIVE_LABELS: Record<WorkflowStage, string> = {
   ingest: 'Downloading…',
   separate: 'Separating stems…',
   detect: 'Detecting onsets…',
+  groove: 'Imagining drums…',
   render: 'Rendering percussion…',
   finalize: 'Saving results…',
 }
@@ -40,6 +43,7 @@ const LEGACY_STAGE_LABELS: Record<string, WorkflowStage> = {
   'Downloading Audio': 'ingest',
   'Separating Vocals': 'separate',
   'Analyzing Syllables': 'detect',
+  'Imagining drums': 'groove',
   'Synthesizing Beats': 'render',
   'Saving Results': 'finalize',
 }

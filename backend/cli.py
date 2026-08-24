@@ -22,11 +22,31 @@ def main():
         help="Force recomputation starting at this stage (earlier stages are "
              "reused from the cache). Omit to reuse every cached artifact.",
     )
+    parser.add_argument(
+        "--no-groove",
+        action="store_true",
+        help="Skip the GrooVAE tap2drum model and use the built-in heuristic "
+             "drum mapping. Local runs without Magenta installed fall back to "
+             "the heuristic automatically; this forces it.",
+    )
+    parser.add_argument(
+        "--kit",
+        default=None,
+        help="Path to a drum kit directory (see backend/kits/README.md for the "
+             "folder format). Defaults to the bundled kit or $KIT_DIR.",
+    )
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
     artifacts_root = args.artifacts or os.path.join(args.outdir, "artifacts")
     os.makedirs(artifacts_root, exist_ok=True)
+
+    # CLI flags mirror the GROOVE_ENABLED / KIT_DIR env vars via render params.
+    params = {}
+    if args.no_groove:
+        params["groove_enabled"] = False
+    if args.kit:
+        params["kit"] = args.kit
 
     def on_progress(stage, label, state, reused):
         if state == "RUNNING":
@@ -37,6 +57,7 @@ def main():
     result = workflow.run_local(
         artifacts_root,
         args.input,
+        params=params,
         from_stage=args.from_stage,
         yt_cookies=os.environ.get("YT_COOKIES"),
         yt_proxy=os.environ.get("YT_PROXY"),
