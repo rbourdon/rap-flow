@@ -57,7 +57,12 @@ high-quality synthesized) one-shots rather than per-syllable beeps.
   through Magenta's `groovae_2bar_tap_fixed_velocity` model. The model expands the
   taps into a full 9-class drum performance (kick, snare, closed/open hat, three
   toms, crash, ride) with per-note velocity and micro-timing. The instrumental is
-  beat-tracked (`librosa.beat.beat_track`) for tempo only, to size the windows.
+  beat-tracked (`librosa.beat.beat_track`), and the resulting **beat times** — not
+  just a single global BPM — drive the model path so it tracks tempo changes: each
+  2-bar window is cut at *actual* beat boundaries (every 8 beats) and the model's
+  fixed 120 BPM output is rescaled into that window's own real duration, then
+  soft-snapped to the local (drift-following) 16th grid. Tracks with a degenerate
+  beat grid fall back to uniform windows at the global tempo.
 - **Isolated environment.** Magenta pins an old TensorFlow that conflicts with the
   demucs/torch worker image, so the model call lives in `groovae.py` and runs in a
   **separate Modal function with its own image** (Magenta + note-seq, checkpoint
@@ -96,9 +101,12 @@ high-quality synthesized) one-shots rather than per-syllable beeps.
   is ducked, so the mix doesn't pump. Each dip has a 5 ms attack ramp and a linear
   release (default 80 ms) to a floor of `0.7` (~ -3 dB). Set `DUCK_BAND_LIMITED=0`
   for full-band ducking with the same gentle envelope.
-- **MIDI export.** The `.mid` file is built from the drum score with a real tempo
-  meta message and proper `ticks_per_beat` math, so it imports on-grid into a DAW
-  with the full set of 9-class drum notes and per-note velocities.
+- **MIDI export.** The `.mid` file is built from the drum score with proper
+  `ticks_per_beat` math, so it imports on-grid into a DAW with the full set of
+  9-class drum notes and per-note velocities. When the score carries the tracked
+  beat times, a **drifting tempo map** (one `set_tempo` per beat interval) is
+  written so the DAW's bar grid follows the song's tempo changes; otherwise a
+  single tempo meta is used.
 
 
 ## YouTube ingestion & the "HTTP Error 403: Forbidden" problem

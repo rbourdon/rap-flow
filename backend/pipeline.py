@@ -327,7 +327,7 @@ def detect_syllables(vocals_wav: str):
     voiced_mask = (periodicity > 0.2)[:len(rms)] if len(periodicity) else np.zeros(len(rms), bool)
     voiced_rms = rms[:len(voiced_mask)][voiced_mask]
     median_voiced_rms = float(np.median(voiced_rms)) if len(voiced_rms) else 0.0
-    rms_gate = 0.2 * median_voiced_rms
+    rms_gate = 0.25 * median_voiced_rms
     # Window of +/-25 ms around an onset, in 10 ms frames.
     rms_half_win = 2
 
@@ -348,8 +348,9 @@ def detect_syllables(vocals_wav: str):
         f0 = pitch[crepe_frame]
         per = periodicity[crepe_frame]
 
-        # Strength gate: drop the weakest normalized onsets.
-        if strength < 0.1:
+        # Strength gate: drop the weakest normalized onsets. These are usually
+        # separation artifacts / breaths that would become spurious taps.
+        if strength < 0.12:
             continue
 
         # RMS gate: drop onsets sitting in near-silence relative to the voiced
@@ -397,6 +398,65 @@ def _apply_duck(inst, env, sr, band_limited):
 # Roles that duck the instrumental (kick & snare); hats/cymbals/toms do not.
 _DUCKING_CLASSES = ("kick", "snare")
 
+# Clamp per-beat tempi derived from beat tracking to a sane BPM range so a
+# spurious beat interval can't emit an absurd MIDI tempo.
+_MIDI_MIN_BPM = 20.0
+_MIDI_MAX_BPM = 320.0
+
+
+def _build_midi_tempo_map(beat_times, ticks_per_beat, fallback_tempo_us):
+    """Build a drifting MIDI tempo map + a seconds->absolute-tick mapper.
+
+    Given the tracked ``beat_times`` (seconds), place beat *i* at tick
+    ``i * ticks_per_beat`` and set one ``set_tempo`` per beat interval to that
+    interval's real duration. A DAW then reconstructs each note's wall-clock time
+    while showing a bar grid that follows the song's tempo changes.
+
+    Returns ``(tempo_changes, sec_to_tick)`` where ``tempo_changes`` is a list of
+    ``(abs_tick, tempo_us)`` (sorted, tick >= 0) and ``sec_to_tick`` maps a time
+    in seconds to an absolute tick along the same piecewise-linear beat grid.
+    Falls back to a single constant tempo when the beat grid is degenerate.
+    """
+    beats = np.asarray(beat_times, dtype=float) if beat_times is not None else None
+    if beats is None or len(beats) < 2:
+        def sec_to_tick(t):
+            return int(round(mido.second2tick(max(0.0, t), ticks_per_beat,
+                                              fallback_tempo_us)))
+        return [(0, fallback_tempo_us)], sec_to_tick
+
+    beats = np.sort(beats)
+    n = len(beats)
+    min_us = int(round(60_000_000.0 / _MIDI_MAX_BPM))
+    max_us = int(round(60_000_000.0 / _MIDI_MIN_BPM))
+
+    tempo_changes = []
+    for i in range(n - 1):
+        dur = beats[i + 1] - beats[i]
+        if dur <= 0:
+            continue
+        tempo_us = int(round(dur * 1_000_000.0))
+        tempo_us = max(min_us, min(max_us, tempo_us))
+        tempo_changes.append((i * ticks_per_beat, tempo_us))
+    if not tempo_changes:
+        tempo_changes = [(0, fallback_tempo_us)]
+
+    def sec_to_tick(t):
+        if t <= beats[0]:
+            dur = beats[1] - beats[0]
+            tick = (t - beats[0]) / dur * ticks_per_beat if dur > 0 else 0.0
+        elif t >= beats[-1]:
+            dur = beats[-1] - beats[-2]
+            base = (n - 1) * ticks_per_beat
+            tick = base + ((t - beats[-1]) / dur * ticks_per_beat if dur > 0 else 0.0)
+        else:
+            i = int(np.searchsorted(beats, t, side="right")) - 1
+            dur = beats[i + 1] - beats[i]
+            frac = (t - beats[i]) / dur if dur > 0 else 0.0
+            tick = (i + frac) * ticks_per_beat
+        return max(0, int(round(tick)))
+
+    return tempo_changes, sec_to_tick
+
 
 def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
                   kit_dir: str = None, duck_floor: float = None,
@@ -432,6 +492,7 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
 
     notes = drum_score.get('notes', []) if isinstance(drum_score, dict) else drum_score
     tempo = float(drum_score.get('tempo', 0.0)) if isinstance(drum_score, dict) else 0.0
+    beat_times = drum_score.get('beat_times') if isinstance(drum_score, dict) else None
 
     # Play the score through the real-sample engine.
     kit = _sampler.DrumKit.load(kit_dir, sr)
@@ -450,18 +511,22 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
     attack_samples = int(sr * 0.005)
     release_samples = int(sr * duck_release_ms / 1000.0)
 
-    # MIDI export from the drum score with a real tempo meta message.
+    # MIDI export from the drum score. When the score carries the tracked beat
+    # times, a drifting tempo map is written so a DAW's bar grid follows the
+    # song's tempo changes; otherwise a single tempo meta is used.
     mid = mido.MidiFile()
     track = mido.MidiTrack()
     mid.tracks.append(track)
     ticks_per_beat = 480
     mid.ticks_per_beat = ticks_per_beat
     bpm = tempo if tempo and tempo > 0 else 120.0
-    tempo_us = mido.bpm2tempo(bpm)
-    track.append(mido.MetaMessage('set_tempo', tempo=tempo_us, time=0))
+    fallback_tempo_us = mido.bpm2tempo(bpm)
+    tempo_changes, sec_to_tick = _build_midi_tempo_map(
+        beat_times, ticks_per_beat, fallback_tempo_us)
     note_len_ticks = max(1, ticks_per_beat // 8)
-    last_tick = 0
 
+    # Ducking envelope is driven off audio-sample positions (absolute seconds),
+    # independent of the MIDI tick grid.
     placed.sort(key=lambda a: a['t'])
     for a in placed:
         idx = int(a['t'] * sr)
@@ -475,12 +540,29 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
                 rel = np.linspace(duck_floor, 1.0, r_end - idx)
                 duck_envelope[idx:r_end] = np.minimum(duck_envelope[idx:r_end], rel)
 
-        abs_tick = int(round(mido.second2tick(a['t'], ticks_per_beat, tempo_us)))
-        delta = max(0, abs_tick - last_tick)
+    # Merge tempo metas and note on/off events on an absolute-tick timeline, then
+    # emit them in order as delta times. Rank orders ties at the same tick so a
+    # tempo change and note_off precede a note_on.
+    events = []  # (abs_tick, rank, builder)
+    for abs_tick, tempo_us in tempo_changes:
+        events.append((abs_tick, 0,
+                       lambda d, tu=tempo_us: mido.MetaMessage('set_tempo', tempo=tu, time=d)))
+    for a in placed:
+        on_tick = sec_to_tick(a['t'])
+        off_tick = on_tick + note_len_ticks
         vel = int(min(127, max(1, a['velocity'])))
-        track.append(mido.Message('note_on', note=a['midi_note'], velocity=vel, time=delta))
-        track.append(mido.Message('note_off', note=a['midi_note'], velocity=0, time=note_len_ticks))
-        last_tick = abs_tick + note_len_ticks
+        note = int(a['midi_note'])
+        events.append((off_tick, 1,
+                       lambda d, nt=note: mido.Message('note_off', note=nt, velocity=0, time=d)))
+        events.append((on_tick, 2,
+                       lambda d, nt=note, v=vel: mido.Message('note_on', note=nt, velocity=v, time=d)))
+
+    events.sort(key=lambda e: (e[0], e[1]))
+    last_tick = 0
+    for abs_tick, _rank, builder in events:
+        delta = max(0, abs_tick - last_tick)
+        track.append(builder(delta))
+        last_tick = abs_tick
 
     midi_path = output_mix_wav.replace('.wav', '.mid')
     mid.save(midi_path)
@@ -501,6 +583,18 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
     normalized_mix = mix * gain_linear
     normalized_perc = perc_track * gain_linear
     normalized_inst = ducked_inst * gain_linear
+
+    # Safety limiter / true-peak guard. Loudness-normalizing a drum layer on top
+    # of the bed can push peaks past 0 dBFS, which clips and adds crackle. If the
+    # mix exceeds the ceiling, pull the whole mix down by the overshoot (applied
+    # equally to the stems so their relationship is preserved) so nothing clips.
+    ceiling = 0.985
+    peak = float(np.max(np.abs(normalized_mix))) if normalized_mix.size else 0.0
+    if peak > ceiling:
+        limiter_gain = ceiling / peak
+        normalized_mix = normalized_mix * limiter_gain
+        normalized_perc = normalized_perc * limiter_gain
+        normalized_inst = normalized_inst * limiter_gain
 
     sf.write(output_mix_wav, normalized_mix, sr)
     sf.write(perc_only_path, normalized_perc, sr)
