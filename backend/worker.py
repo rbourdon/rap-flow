@@ -46,8 +46,18 @@ GROOVE_CKPT_URL = (
 groove_image = modal.Image.debian_slim(python_version="3.10") \
     .apt_install("ffmpeg", "curl", "libsndfile1") \
     .pip_install(
-        "magenta", "note-seq", "librosa", "soundfile", "numpy", "scipy",
-        "mido", "pyloudnorm", "requests"
+        # Pin Magenta to its final release so the build is deterministic and
+        # matches the transitive dependency set this image was validated against.
+        "magenta==2.1.4", "note-seq", "librosa", "soundfile", "numpy", "scipy",
+        "mido", "pyloudnorm", "requests",
+        # Magenta transitively requires ``apache-beam[gcp]>=2.14.0``, whose
+        # google-cloud extras form an enormous, loosely-bounded dependency tree.
+        # pip's backtracking resolver explores it for over an hour before giving
+        # up with ``ResolutionTooDeep: 200000``, which is what stalls and fails
+        # the deploy. Magenta predates that resolver and was only ever meant to
+        # install with the legacy (first-fit) one, so use it here to avoid the
+        # combinatorial backtracking explosion.
+        extra_options="--use-deprecated=legacy-resolver",
     ) \
     .run_commands(
         "mkdir -p /models",
