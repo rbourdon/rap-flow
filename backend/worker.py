@@ -45,14 +45,27 @@ GROOVE_CKPT_URL = (
 )
 groove_image = modal.Image.debian_slim(python_version="3.10") \
     .apt_install(
-        # ``python-rtmidi`` (pulled in transitively via magenta/note-seq) builds
-        # a C++ extension against the ALSA (``alsa/asoundlib.h``) and JACK
-        # (``jack/jack.h``) headers. debian_slim ships neither, so the wheel
-        # build fails with ``fatal error: alsa/asoundlib.h: No such file`` and
-        # aborts the whole image build. Provide the dev packages so it compiles.
+        # ``python-rtmidi`` (pulled in transitively via magenta/note-seq) links
+        # its C++ extension against the ALSA and JACK shared libraries at
+        # runtime. We install a prebuilt wheel below (see ``python-rtmidi`` in
+        # ``pip_install``) rather than compiling from source, but keep the dev
+        # packages so the runtime ``libasound2``/``libjack`` shared objects the
+        # wheel dlopens are present.
         "ffmpeg", "curl", "libsndfile1", "libasound2-dev", "libjack-dev",
     ) \
     .pip_install(
+        # Magenta 2.1.4 hard-pins ``python-rtmidi==1.1.2``, whose Cython-generated
+        # C++ still references ``tp_print`` and ``PyUnicode_GET_SIZE`` - symbols
+        # CPython removed in 3.9/3.10 - so it fails to compile on this image's
+        # Python 3.10 (Modal's minimum supported version). Modal can't run an
+        # older interpreter, so instead we list a Python 3.10-compatible
+        # ``python-rtmidi`` (which ships a manylinux wheel, no compilation) FIRST.
+        # With the legacy resolver, the first-stated top-level pin wins, so this
+        # satisfies magenta's dependency without building the incompatible 1.1.2.
+        # rtmidi is only used for realtime hardware MIDI I/O, which the groove
+        # (tap2drum) stage never touches, so the newer version is functionally
+        # equivalent here.
+        "python-rtmidi==1.5.8",
         # Pin Magenta to its final release so the build is deterministic and
         # matches the transitive dependency set this image was validated against.
         "magenta==2.1.4", "note-seq", "librosa", "soundfile", "numpy", "scipy",
