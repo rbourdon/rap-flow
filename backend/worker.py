@@ -44,7 +44,14 @@ GROOVE_CKPT_URL = (
     "groovae_2bar_tap_fixed_velocity.tar"
 )
 groove_image = modal.Image.debian_slim(python_version="3.10") \
-    .apt_install("ffmpeg", "curl", "libsndfile1") \
+    .apt_install(
+        # ``python-rtmidi`` (pulled in transitively via magenta/note-seq) builds
+        # a C++ extension against the ALSA (``alsa/asoundlib.h``) and JACK
+        # (``jack/jack.h``) headers. debian_slim ships neither, so the wheel
+        # build fails with ``fatal error: alsa/asoundlib.h: No such file`` and
+        # aborts the whole image build. Provide the dev packages so it compiles.
+        "ffmpeg", "curl", "libsndfile1", "libasound2-dev", "libjack-dev",
+    ) \
     .pip_install(
         # Pin Magenta to its final release so the build is deterministic and
         # matches the transitive dependency set this image was validated against.
