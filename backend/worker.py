@@ -32,47 +32,15 @@ image = modal.Image.debian_slim(python_version="3.12") \
     ) \
     .env({"KIT_DIR": "/root/kits/default"}) \
     .add_local_dir("kits", "/root/kits") \
-    .add_local_python_source("pipeline", "workflow", "rhythm", "sampler")
-
-# Isolated image for the GrooVAE (tap2drum) groove stage. Magenta pins an old
-# TensorFlow that conflicts with the demucs/torch worker image above, so the
-# groove stage runs in its own image with Magenta/note-seq and the checkpoint
-# baked in at build time. None of these dependencies leak into the main worker
-# image. The checkpoint is fetched once during the build.
-GROOVE_CKPT_URL = (
-    "https://storage.googleapis.com/magentadata/models/music_vae/checkpoints/"
-    "groovae_2bar_tap_fixed_velocity.tar"
-)
-groove_image = modal.Image.debian_slim(python_version="3.10") \
-    .apt_install(
-        # ``python-rtmidi`` (pulled in transitively via magenta/note-seq) builds
-        # a C++ extension against the ALSA (``alsa/asoundlib.h``) and JACK
-        # (``jack/jack.h``) headers. debian_slim ships neither, so the wheel
-        # build fails with ``fatal error: alsa/asoundlib.h: No such file`` and
-        # aborts the whole image build. Provide the dev packages so it compiles.
-        "ffmpeg", "curl", "libsndfile1", "libasound2-dev", "libjack-dev",
-    ) \
-    .pip_install(
-        # Pin Magenta to its final release so the build is deterministic and
-        # matches the transitive dependency set this image was validated against.
-        "magenta==2.1.4", "note-seq", "librosa", "soundfile", "numpy", "scipy",
-        "mido", "pyloudnorm", "requests",
-        # Magenta transitively requires ``apache-beam[gcp]>=2.14.0``, whose
-        # google-cloud extras form an enormous, loosely-bounded dependency tree.
-        # pip's backtracking resolver explores it for over an hour before giving
-        # up with ``ResolutionTooDeep: 200000``, which is what stalls and fails
-        # the deploy. Magenta predates that resolver and was only ever meant to
-        # install with the legacy (first-fit) one, so use it here to avoid the
-        # combinatorial backtracking explosion.
-        extra_options="--use-deprecated=legacy-resolver",
-    ) \
-    .run_commands(
-        "mkdir -p /models",
-        f"curl -fsSL {GROOVE_CKPT_URL} -o /models/groovae_2bar_tap_fixed_velocity.tar",
-    ) \
-    .env({"GROOVE_CKPT": "/models/groovae_2bar_tap_fixed_velocity.tar"}) \
     .add_local_python_source(
-        "pipeline", "workflow", "rhythm", "sampler", "groove", "groovae"
+        "pipeline", "workflow", "rhythm", "sampler",
+        # The two-layer drum generator and the percussion bus chain. These are
+        # plain numpy/scipy/librosa, so they run on this image alongside
+        # everything else - there is no second image any more. The Magenta /
+        # TensorFlow image that used to exist just for the groove stage (with its
+        # baked-in checkpoint, ALSA/JACK dev headers and legacy-pip-resolver
+        # workaround) is gone with GrooVAE.
+        "groove", "flow", "backbone", "bus",
     )
 
 # Demucs model weights, cached across runs.
@@ -263,22 +231,34 @@ def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
     _stage_start(job_id, "detect", callback_url, hmac_secret)
     res = workflow.stage_detect(ARTIFACTS_ROOT, source_url, params, force=force)
     artifacts.commit()
-    _stage_done(job_id, "detect", res.get("reused"), callback_url, hmac_secret)
+    _post_callback({
+        "jobId": job_id,
+        "status": "PROCESSING",
+        "stage": workflow.STAGE_LABELS["detect"],
+        "stageKey": "detect",
+        "stageState": "REUSED" if res.get("reused") else "COMPLETED",
+        "reused": bool(res.get("reused")),
+        # Surfaced when the vowel-nucleus detector came back empty/sparse and
+        # the old spectral-flux detector took over.
+        **({"warning": res["warning"]} if res.get("warning") else {}),
+    }, callback_url, hmac_secret, timeout=5)
     # Drop the (potentially large) events list from the return value; downstream
     # stages re-read events.json from the volume.
     res.pop("events", None)
     return res
 
 
-@app.function(image=groove_image, volumes=_ARTIFACT_MOUNT, timeout=900,
+@app.function(image=image, volumes=_ARTIFACT_MOUNT, timeout=900,
               retries=1, secrets=_SECRETS)
 def stage_groove(job_id: str, source_url: str, params: dict, force: bool,
                  callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
-    """GrooVAE (tap2drum) drum-score stage, in its own Magenta image.
+    """Two-layer drum-score stage, on the standard CPU image.
 
-    Falls back to a heuristic drum score inside ``workflow.stage_groove`` if
-    Magenta is unavailable or fails, so this stage never fails the job; any
-    fallback surfaces a warning in the stage state.
+    The flow layer comes from the syllables and the backbone from the song's own
+    ``drums.wav`` stem; no model is involved, so this no longer needs its own
+    image. Every degradation (missing drum stem, sparse transcription,
+    degenerate beat grid) falls back inside ``workflow.stage_groove`` and
+    surfaces a non-fatal warning in the stage state rather than failing the job.
     """
     artifacts.reload()
     _stage_start(job_id, "groove", callback_url, hmac_secret)

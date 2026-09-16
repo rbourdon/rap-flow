@@ -20,8 +20,11 @@ export type WorkflowStage = (typeof WORKFLOW_STAGES)[number]
 export const STAGE_LABELS: Record<WorkflowStage, string> = {
   ingest: 'Downloading audio',
   separate: 'Separating stems',
-  detect: 'Detecting onsets',
-  groove: 'Imagining drums',
+  // The detector finds syllable nuclei now, not bare spectral onsets.
+  detect: 'Detecting syllables',
+  // Nothing imagines anything: the flow layer comes from the syllables and the
+  // backbone is transcribed from the song's own drum stem.
+  groove: 'Building the groove',
   render: 'Rendering percussion',
   finalize: 'Saving results',
 }
@@ -30,19 +33,21 @@ export const STAGE_LABELS: Record<WorkflowStage, string> = {
 export const STAGE_ACTIVE_LABELS: Record<WorkflowStage, string> = {
   ingest: 'Downloading…',
   separate: 'Separating stems…',
-  detect: 'Detecting onsets…',
-  groove: 'Imagining drums…',
+  detect: 'Detecting syllables…',
+  groove: 'Building the groove…',
   render: 'Rendering percussion…',
   finalize: 'Saving results…',
 }
 
 // The worker historically wrote human-readable labels (e.g. "Downloading
-// Audio") to `job.stage` instead of the machine id. Accept either form so old
-// in-flight jobs still map to a stage. Returns the machine id or null.
+// Audio") to `job.stage` instead of the machine id, and the labels above have
+// since been renamed. Accept every past form so old in-flight jobs and old
+// `job.stage` rows still map to a stage. Returns the machine id or null.
 const LEGACY_STAGE_LABELS: Record<string, WorkflowStage> = {
   'Downloading Audio': 'ingest',
   'Separating Vocals': 'separate',
   'Analyzing Syllables': 'detect',
+  'Detecting onsets': 'detect',
   'Imagining drums': 'groove',
   'Synthesizing Beats': 'render',
   'Saving Results': 'finalize',

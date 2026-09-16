@@ -8,13 +8,15 @@ import { btnPrimary, focusRing } from '@/lib/ui'
 
 // Stages a user can meaningfully re-run for an existing job. `finalize` (blob
 // upload) is excluded - it always runs as part of any reprocess. Each entry
-// reuses every upstream artifact from the durable cache, so e.g. "Synthesize
-// Beats" re-renders using the already-separated stems without re-downloading.
+// reuses every upstream artifact from the durable cache, so e.g. "Re-render
+// beats" re-renders using the already-separated stems without re-downloading.
+// For the flow-versus-backbone balance alone, use the slider above: it re-runs
+// only the render stage and does not touch the drum score.
 const REPROCESSABLE: { stage: WorkflowStage; label: string; hint: string }[] = [
   { stage: 'ingest', label: 'Re-download source', hint: 're-fetches the audio' },
   { stage: 'separate', label: 'Re-separate stems', hint: 'reuses the download' },
-  { stage: 'detect', label: 'Re-analyze syllables', hint: 'reuses the stems' },
-  { stage: 'groove', label: 'Re-imagine drums', hint: 'reuses stems & syllables' },
+  { stage: 'detect', label: 'Re-detect syllables', hint: 'reuses the stems' },
+  { stage: 'groove', label: 'Rebuild the groove', hint: 'reuses stems & syllables' },
   { stage: 'render', label: 'Re-render beats', hint: 'reuses the drum score' },
 ]
 

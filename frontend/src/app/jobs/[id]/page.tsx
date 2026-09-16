@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { WaveSurferPlayer } from './WaveSurferPlayer'
 import { RetryButton } from './RetryButton'
 import { ReprocessControls } from './ReprocessControls'
+import { FlowMixBalance } from './FlowMixBalance'
 import { ClientDate } from '@/components/ClientDate'
 import { JobStatusTracker } from './JobStatusTracker'
 import { DeleteJobButton } from '@/components/DeleteJobButton'
@@ -153,6 +154,16 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
           />
         )}
 
+        {/* A re-render in flight on a job that already has a mix: keep the
+            balance visible (read-only) so the listener can see what they asked
+            for while it rebuilds, instead of the control vanishing. */}
+        {(job.status === 'PENDING' || job.status === 'PROCESSING') && job.resultBlobUrl && (
+          <div className={`mt-8 ${card} p-5 sm:p-8`}>
+            <h2 className="text-sm font-medium text-neutral-400 mb-4">Flow mix</h2>
+            <FlowMixBalance jobId={job.id} initialBalance={job.layerBalance} isRunning />
+          </div>
+        )}
+
         {job.status === 'COMPLETED' && job.resultBlobUrl && (
           <div className={`mt-8 ${card} p-5 sm:p-8`}>
             <h2 className="text-xl font-semibold mb-4">Result Mix</h2>
@@ -181,6 +192,10 @@ export default async function JobDetailPage({ params }: { params: Promise<{ id: 
                 </div>
               </div>
             )}
+
+            <div className="mt-6 pt-6 border-t border-white/5">
+              <FlowMixBalance jobId={job.id} initialBalance={job.layerBalance} />
+            </div>
 
             <div className="mt-6 pt-6 border-t border-white/5">
               <ReprocessControls jobId={job.id} />

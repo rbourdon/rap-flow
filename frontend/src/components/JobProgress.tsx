@@ -12,8 +12,8 @@ interface StageState {
   state?: string;
   reused?: boolean;
   updatedAt?: string;
-  // Non-fatal warning surfaced for a stage (e.g. GrooVAE unavailable → the
-  // groove stage fell back to the heuristic drum mapping).
+  // Non-fatal warning surfaced for a stage (e.g. the drum stem transcribed too
+  // sparsely → the groove stage fell back to a grid template).
   warning?: string;
 }
 

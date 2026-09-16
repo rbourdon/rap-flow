@@ -37,14 +37,14 @@ const FEATURES = [
   },
   {
     title: 'Detect',
-    body: "Onset detection finds each syllable in the vocal, marking where the percussion should hit.",
+    body: 'Vowel-nucleus detection finds one event per syllable — plus the sibilants and plosives between them.',
     color: 'text-cyan-400',
     ring: 'border-cyan-500/20 bg-cyan-500/10',
     icon: <path d="M3 12h4l3 8 4-16 3 8h4" />,
   },
   {
     title: 'Render',
-    body: "Those onsets become a percussion track, quantized to the song's grid and mixed back with the instrumental.",
+    body: "Two layers: hats and accents land on the syllables exactly where they fell, over a kick-and-snare backbone taken from the song's own drums.",
     color: 'text-purple-400',
     ring: 'border-purple-500/20 bg-purple-500/10',
     icon: (
@@ -76,8 +76,9 @@ export default async function Home() {
             </h1>
 
             <p className="text-lg sm:text-xl md:text-2xl text-neutral-300 mb-10 sm:mb-12 max-w-2xl font-light leading-relaxed">
-              rap-flow separates a song&apos;s vocals with Demucs, detects the syllable onsets,
-              and renders them as a percussion track mapped to the song&apos;s grid.
+              rap-flow separates a song&apos;s vocals with Demucs, finds every syllable,
+              and plays a drum on each one — at the exact moment it was rapped, over a
+              backbone taken from the record&apos;s own beat.
             </p>
 
             <div>
@@ -160,7 +161,7 @@ export default async function Home() {
                   <p className="text-neutral-300 mb-4">No tracks yet — start one with the panel on the left.</p>
                   <ol className="text-sm text-neutral-400 flex flex-col sm:flex-row gap-2 sm:gap-4">
                     <li><span className="text-indigo-300 font-medium">1.</span> Paste a URL or drop audio</li>
-                    <li><span className="text-indigo-300 font-medium">2.</span> We separate &amp; detect onsets</li>
+                    <li><span className="text-indigo-300 font-medium">2.</span> We separate &amp; detect syllables</li>
                     <li><span className="text-indigo-300 font-medium">3.</span> Play back the percussion</li>
                   </ol>
                 </div>

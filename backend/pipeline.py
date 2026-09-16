@@ -194,7 +194,7 @@ def ingest_audio(input_url_or_path: str, output_path: str, yt_cookies: str = Non
 
     return {"output_path": output_path, "metadata": metadata}
 
-def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0):
+def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -14.0):
     """
     Separates the input wav into vocals and instrumental using Demucs.
 
@@ -207,6 +207,14 @@ def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0)
     original drums a bit opens up headroom for the new percussion layer
     without removing the beat entirely (which would leave holes when the
     detector misses a syllable).
+
+    This is deeper than the -8 dB it used to be, and that change is load-bearing
+    for the new backbone: the bed is now *transcribed from these same drums* and
+    re-played with kit samples on top of them (see :mod:`backbone`), so the
+    record's kick and the sampled kick both sound and any timing difference
+    between them flams. Keeping the record's drums well under the kit is what
+    stops the backbone smearing; the tight ``BACKBONE_SNAP_MS`` window is the
+    other half of the same problem.
     """
     import torch  # noqa: F401 - kept for parity; demucs pulls torch in
     import demucs.api
@@ -257,70 +265,393 @@ def separate_audio(input_wav: str, output_dir: str, drums_duck_db: float = -8.0)
 
 import scipy.signal
 
-def detect_syllables(vocals_wav: str):
-    """
-    Detects syllable events on the vocal stem using spectral onset detection.
-    Returns a list of dicts: { "t": float, "strength": float, "f0": float, "periodicity": float, "dur": float }
+# ---------------------------------------------------------------------------
+# Syllable detection
+#
+# The detector answers one question: *where does each syllable start?* Every
+# drum in the flow layer is placed at one of these times verbatim (see
+# :mod:`flow`), so an event list that is not one-per-syllable makes a drum score
+# that cannot line up with the voice no matter what happens downstream.
+#
+# Two detectors run side by side:
+#   * **nuclei** - peaks in the smoothed vowel-band (~300-3400 Hz) loudness
+#     envelope, masked to voiced frames. One peak == one syllable. This replaces
+#     the old raw spectral-flux peak-picker, which fired on *any* spectral
+#     change (breaths, sibilance, Demucs artefacts, note changes inside one held
+#     vowel) and so both over-fired inside long vowels and missed soft syllables.
+#   * **transients** - high-band (>= 4 kHz) flux peaks on *unvoiced* frames, i.e.
+#     sibilants and plosives, which get their own drum role instead of being
+#     discarded.
+#
+# The old flux detector is kept as :func:`_flux_events` and is used as a
+# fallback when the nucleus detector comes back empty or implausibly sparse.
+# ---------------------------------------------------------------------------
 
-    Demucs vocal stems carry breaths, sibilance and separation artifacts that
-    the raw spectral-flux detector happily fires on. Two gates prune those:
-    an RMS gate discards onsets whose local vocal energy is well below the
-    track's typical voiced level (breaths/artifacts sit in near-silence), and
-    a strength gate discards the weakest normalized onsets.
+# Analysis rate / hop shared by every envelope here and by torchcrepe, so frame
+# indices are directly comparable across detectors.
+_ANALYSIS_SR = 22050
+_HOP_SECONDS = 0.010
+_N_FFT = 1024
+
+# Vowel formant band used for the nucleus envelope.
+_VOWEL_BAND_HZ = (300.0, 3400.0)
+# High band used for the consonant/transient detector.
+_TRANSIENT_BAND_HZ = 4000.0
+
+# A transient this close *before* a nucleus attack is that syllable's own onset
+# consonant; the nucleus event already represents it.
+_TRANSIENT_SUPPRESS_S = 0.045
+
+# Safety-net grouping applied *within* each event kind (nuclei are already
+# one-per-syllable, so the old whole-stream grouping is gone).
+_EVENT_GROUP_MIN_GAP = 0.045
+
+# Window searched backwards from a nucleus peak for the syllable's attack.
+_ATTACK_SEARCH_S = 0.080
+
+# Below this many nuclei per second of voiced audio the nucleus detector is
+# considered to have failed and the flux fallback takes over.
+_MIN_NUCLEI_PER_VOICED_SECOND = 0.8
+
+
+def _env_float(name, default):
+    try:
+        return float(os.environ[name])
+    except (KeyError, TypeError, ValueError):
+        return float(default)
+
+
+def _env_flag(name, default):
+    val = os.environ.get(name)
+    if val is None:
+        return bool(default)
+    return val.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _syllable_params():
+    """Resolve the syllable-detector tunables from the environment."""
+    return {
+        "detector": (os.environ.get("SYL_DETECTOR") or "nucleus").strip().lower(),
+        "min_gap_ms": _env_float("SYL_MIN_GAP_MS", 70.0),
+        "prominence": _env_float("SYL_PROMINENCE", 0.28),
+        "voiced_threshold": _env_float("SYL_VOICED_THRESHOLD", 0.35),
+        "transient_enabled": _env_flag("TRANSIENT_ENABLED", True),
+        "transient_min_gap_ms": _env_float("TRANSIENT_MIN_GAP_MS", 40.0),
+    }
+
+
+def _smooth_frames(x, fps, win_seconds):
+    """Smooth a frame-rate signal with a normalized Hann window."""
+    n = max(3, int(round(win_seconds * fps)))
+    if n % 2 == 0:
+        n += 1
+    if n >= len(x):
+        return np.full_like(x, float(np.mean(x))) if len(x) else x
+    win = np.hanning(n)
+    win /= float(np.sum(win))
+    return np.convolve(x, win, mode="same")
+
+
+def _vowel_band_attack_envelope(y, sr, hop_length):
+    """A high-time-resolution vowel-band envelope, for locating attacks.
+
+    The nucleus envelope is built from a 1024-point STFT and smoothed over
+    50 ms, which is what makes one vowel read as one peak — but that window
+    smears an onset ~30 ms earlier than it happened, and the attack is the one
+    number in an event that has to be right to the millisecond. So the attack
+    search runs on a time-domain bandpass plus a single-hop RMS instead:
+    frame-aligned to the STFT (both centred on ``i * hop``), ~±5 ms resolution.
     """
+    sos = scipy.signal.butter(
+        4, [_VOWEL_BAND_HZ[0], _VOWEL_BAND_HZ[1]], btype='band', fs=sr,
+        output='sos',
+    )
+    band = scipy.signal.sosfilt(sos, y)
+    rms = librosa.feature.rms(
+        y=band, frame_length=hop_length, hop_length=hop_length, center=True
+    )[0]
+    return 20.0 * np.log10(rms + 1e-10)
+
+
+def _band_energy(mag, freqs, lo_hz, hi_hz=None):
+    """Sum STFT magnitude over a frequency band."""
+    if hi_hz is None:
+        band = freqs >= lo_hz
+    else:
+        band = (freqs >= lo_hz) & (freqs <= hi_hz)
+    if not np.any(band):
+        return np.zeros(mag.shape[1], dtype=float)
+    return np.asarray(mag[band, :].sum(axis=0), dtype=float)
+
+
+def _crepe_pitch(y, sr):
+    """Run torchcrepe exactly as before; returns ``(pitch, periodicity)``."""
     import torch
     import torchcrepe
 
-    # Load audio as mono, 22050 Hz for analysis
-    sr_analysis = 22050
-    y, sr = librosa.load(vocals_wav, sr=sr_analysis, mono=True)
+    y_16k = librosa.resample(y, orig_sr=sr, target_sr=16000)
+    audio_tensor = torch.from_numpy(y_16k).float().unsqueeze(0)
+    pitch, periodicity = torchcrepe.predict(
+        audio_tensor,
+        sample_rate=16000,
+        hop_length=int(16000 * _HOP_SECONDS),
+        fmin=50,
+        fmax=2000,
+        model='tiny',
+        return_periodicity=True,
+    )
+    pitch = np.atleast_1d(pitch.squeeze().numpy()).astype(float)
+    periodicity = np.atleast_1d(periodicity.squeeze().numpy()).astype(float)
+    return pitch, periodicity
 
-    # 1. Use librosa's spectral onset detection
-    hop_length = int(sr_analysis * 0.010) # 10 ms
 
-    # Calculate onset envelope using spectral flux
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr_analysis, hop_length=hop_length)
+def _align_to_frames(values, n_frames):
+    """Resample a per-frame series onto ``n_frames`` frames of the same hop.
 
-    # Detect onsets with a minimum distance (e.g. ~60ms) and low threshold to catch unvoiced consonants
+    torchcrepe and librosa disagree by a frame or two on how many frames a
+    buffer yields; both use a 10 ms hop, so a linear resample over frame index
+    keeps them aligned without a time shift.
+    """
+    values = np.asarray(values, dtype=float)
+    if n_frames <= 0:
+        return np.zeros(0, dtype=float)
+    if len(values) == 0:
+        return np.zeros(n_frames, dtype=float)
+    if len(values) == n_frames:
+        return values
+    src = np.linspace(0.0, 1.0, len(values))
+    dst = np.linspace(0.0, 1.0, n_frames)
+    return np.interp(dst, src, values)
+
+
+def _relative_stress(times, prominences, window_s=2.0):
+    """Prominence relative to the loudest event in a ~``window_s`` window.
+
+    Accents are a *local* judgement: a quiet passage should still get its own
+    accents rather than being flattened by a shouted hook elsewhere in the
+    track.
+    """
+    times = np.asarray(times, dtype=float)
+    prominences = np.asarray(prominences, dtype=float)
+    out = np.zeros(len(times), dtype=float)
+    half = window_s / 2.0
+    for i, t in enumerate(times):
+        lo = np.searchsorted(times, t - half, side="left")
+        hi = np.searchsorted(times, t + half, side="right")
+        local_max = float(np.max(prominences[lo:hi])) if hi > lo else 0.0
+        if local_max > 0:
+            out[i] = float(np.clip(prominences[i] / local_max, 0.0, 1.0))
+    return out
+
+
+def _normalize_strength(prominences):
+    """Normalize prominences by the track's **P95**, not its max.
+
+    The old detector divided by ``np.max``, so a single outlier peak (a shout, a
+    separation artefact) compressed every other strength toward zero and made
+    the whole track render quiet.
+    """
+    prominences = np.asarray(prominences, dtype=float)
+    if not len(prominences):
+        return prominences
+    ref = float(np.percentile(prominences, 95))
+    if ref <= 0:
+        ref = float(np.max(prominences)) or 1.0
+    return np.clip(prominences / ref, 0.0, 1.0)
+
+
+def _nucleus_events(mag, freqs, fps, periodicity, pitch, params,
+                    attack_env_db=None):
+    """Detect one event per voiced syllable from the vowel-band envelope."""
+    energy = _band_energy(mag, freqs, *_VOWEL_BAND_HZ)
+    env_db = 20.0 * np.log10(energy + 1e-10)
+    env = _smooth_frames(env_db, fps, 0.050)
+    if not len(env):
+        return []
+    # Work on a floored copy so "zeroing" unvoiced frames really is a floor.
+    floor = float(np.min(env))
+    env = env - floor
+    # Peak-picking wants the 50 ms smoothing (it is what makes one vowel read as
+    # one nucleus); locating the *attack* wants time resolution. See
+    # :func:`_vowel_band_attack_envelope`.
+    if attack_env_db is None:
+        env_fine = env
+    else:
+        env_fine = _align_to_frames(attack_env_db, len(env))
+        env_fine = env_fine - float(np.min(env_fine))
+
+    # Peak prominence is measured against the track's own dynamic range. A fixed
+    # constant (the old ``delta=0.05``) does not hold across tracks.
+    p10, p90 = np.percentile(env, [10, 90])
+    min_prominence = params["prominence"] * max(float(p90 - p10), 1e-6)
+
+    voiced = periodicity >= params["voiced_threshold"]
+    # Breaths and separation hiss sit in unvoiced frames; flooring them there
+    # means they cannot form a nucleus peak at all.
+    env_voiced = np.where(voiced, env, 0.0)
+
+    distance = max(1, int(round(params["min_gap_ms"] / 1000.0 * fps)))
+    candidates, _ = scipy.signal.find_peaks(env_voiced, distance=distance)
+    if not len(candidates):
+        return []
+
+    # Prominence is measured on the *unmasked* envelope. Zeroing unvoiced frames
+    # is what stops breaths forming peaks, but it also puts a cliff at every
+    # voiced/unvoiced boundary, and a peak sitting next to that cliff would
+    # inherit its prominence and pass the gate as a phantom syllable.
+    prominences = scipy.signal.peak_prominences(env, candidates)[0]
+    keep = prominences >= min_prominence
+    keep &= periodicity[candidates] >= params["voiced_threshold"]
+    peaks = candidates[keep]
+    prominences = np.asarray(prominences[keep], dtype=float)
+    if not len(peaks):
+        return []
+
+    hop = 1.0 / fps
+
+    # Syllable boundaries are the minima between consecutive nuclei.
+    boundaries = [max(0, int(peaks[0]) - distance)]
+    for a, b in zip(peaks[:-1], peaks[1:]):
+        seg = env_voiced[a:b]
+        boundaries.append(int(a + (np.argmin(seg) if len(seg) else 0)))
+    boundaries.append(min(len(env) - 1, int(peaks[-1]) + distance))
+
+    attack_span = max(1, int(round(_ATTACK_SEARCH_S * fps)))
+    strengths = _normalize_strength(prominences)
+
+    events = []
+    attack_frames = []
+    for i, peak in enumerate(peaks):
+        peak = int(peak)
+        # ``t`` is the ATTACK, not the nucleus. Drums have to hit where the
+        # syllable starts; using the loudness peak would place every hit late by
+        # roughly half a vowel. The attack is the steepest rise of the envelope
+        # in the window preceding the peak.
+        lo = max(0, peak - attack_span)
+        if i > 0:
+            lo = max(lo, int(peaks[i - 1]) + 1)
+        seg = env_fine[lo:peak + 1]
+        if len(seg) >= 2:
+            attack = lo + int(np.argmax(np.diff(seg)))
+        else:
+            attack = peak
+        attack_frames.append(attack)
+
+        dur = max(0.04, float(boundaries[i + 1] - boundaries[i]) * hop)
+        frame = min(peak, len(periodicity) - 1)
+        events.append({
+            "t": float(attack * hop),
+            "strength": float(strengths[i]),
+            "f0": float(pitch[frame]) if len(pitch) else 0.0,
+            "periodicity": float(periodicity[frame]) if len(periodicity) else 0.0,
+            "dur": dur,
+            "kind": "nucleus",
+            "subtype": "voiced",
+            "stress": 0.0,
+        })
+
+    stress = _relative_stress([e["t"] for e in events], prominences)
+    for e, s in zip(events, stress):
+        e["stress"] = float(s)
+    return events
+
+
+def _transient_events(mag, freqs, fps, periodicity, pitch, params,
+                      nucleus_times):
+    """Detect unvoiced consonants (sibilants, plosives) in the high band."""
+    hf = _band_energy(mag, freqs, _TRANSIENT_BAND_HZ)
+    if not len(hf):
+        return []
+    flux = np.maximum(0.0, np.diff(hf, prepend=float(hf[0])))
+    flux = _smooth_frames(flux, fps, 0.015)
+
+    p10, p90 = np.percentile(flux, [10, 90])
+    min_prominence = 0.25 * max(float(p90 - p10), 1e-12)
+    distance = max(1, int(round(params["transient_min_gap_ms"] / 1000.0 * fps)))
+    peaks, props = scipy.signal.find_peaks(
+        flux, distance=distance, prominence=min_prominence
+    )
+    if not len(peaks):
+        return []
+
+    # Adaptive HF floor: a real consonant sits well above the track's typical
+    # high-band level, so a fixed threshold is not needed (or portable).
+    hf_floor = float(np.percentile(hf, 70))
+    prominences = np.asarray(props["prominences"], dtype=float)
+    hop = 1.0 / fps
+    decay_limit = int(round(0.150 * fps))
+
+    kept, kept_prom = [], []
+    for peak, prom in zip(peaks, prominences):
+        peak = int(peak)
+        frame = min(peak, len(periodicity) - 1)
+        if len(periodicity) and periodicity[frame] >= params["voiced_threshold"]:
+            continue  # voiced: the nucleus detector owns this frame
+        if hf[peak] <= hf_floor:
+            continue
+
+        t = float(peak * hop)
+        # A transient just before a nucleus attack is that syllable's own onset
+        # consonant, already represented by the nucleus event.
+        if any(0.0 <= (nt - t) <= _TRANSIENT_SUPPRESS_S for nt in nucleus_times):
+            continue
+
+        # Sub-classify by how long the high band keeps ringing: sustained noise
+        # is a sibilant, a sharp burst is a plosive.
+        half = hf[peak] * 0.5
+        end = peak
+        stop = min(len(hf), peak + decay_limit)
+        while end + 1 < stop and hf[end + 1] > half:
+            end += 1
+        decay_s = float(end - peak) * hop
+        subtype = "sibilant" if decay_s >= 0.040 else "plosive"
+
+        kept.append({
+            "t": t,
+            "strength": 0.0,
+            "f0": float(pitch[frame]) if len(pitch) else 0.0,
+            "periodicity": float(periodicity[frame]) if len(periodicity) else 0.0,
+            "dur": max(0.02, decay_s),
+            "kind": "transient",
+            "subtype": subtype,
+            "stress": 0.0,
+        })
+        kept_prom.append(float(prom))
+
+    if not kept:
+        return []
+    strengths = _normalize_strength(kept_prom)
+    stress = _relative_stress([e["t"] for e in kept], kept_prom)
+    for e, s, st in zip(kept, strengths, stress):
+        e["strength"] = float(s)
+        e["stress"] = float(st)
+    return kept
+
+
+def _flux_events(y, sr, pitch, periodicity):
+    """The **previous** spectral-flux onset detector, kept as a fallback.
+
+    Fires on any spectral change and prunes with two fixed thresholds
+    (``strength < 0.12``, local RMS under a quarter of the voiced median) and a
+    60 ms peak-picking wait. It over-fires inside long vowels and misses soft
+    unvoiced syllables, which is why it is no longer the default - but it is a
+    known-working escape hatch when the nucleus detector finds nothing.
+    """
+    hop_length = int(sr * _HOP_SECONDS)
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
     peaks = librosa.onset.onset_detect(
         onset_envelope=onset_env,
-        sr=sr_analysis,
+        sr=sr,
         hop_length=hop_length,
-        wait=int(0.060 / 0.010),
+        wait=int(0.060 / _HOP_SECONDS),
         pre_max=3,
         post_max=3,
         pre_avg=3,
         post_avg=5,
         delta=0.05,
-        units='frames'
+        units='frames',
     )
 
-    # 2. Get pitch and periodicity using torchcrepe
-    # torchcrepe expects 16kHz audio, shape (1, samples)
-    y_16k = librosa.resample(y, orig_sr=sr_analysis, target_sr=16000)
-    audio_tensor = torch.from_numpy(y_16k).float().unsqueeze(0)
-
-    fmin = 50
-    fmax = 2000
-    hop_length_crepe = int(16000 * 0.010) # 10 ms hop for alignment
-
-    pitch, periodicity = torchcrepe.predict(
-        audio_tensor,
-        sample_rate=16000,
-        hop_length=hop_length_crepe,
-        fmin=fmin,
-        fmax=fmax,
-        model='tiny',
-        return_periodicity=True
-    )
-
-    pitch = pitch.squeeze().numpy()
-    periodicity = periodicity.squeeze().numpy()
-
-    # Per-frame vocal RMS (10 ms hop, aligned to the onset frames) used to
-    # gate out low-energy false onsets. The reference level is the median RMS
-    # over voiced regions (periodicity > 0.2), i.e. where the rapper is
-    # actually singing, so breaths and separation hiss fall well below it.
     rms = librosa.feature.rms(
         y=y, frame_length=2 * hop_length, hop_length=hop_length
     )[0]
@@ -328,49 +659,111 @@ def detect_syllables(vocals_wav: str):
     voiced_rms = rms[:len(voiced_mask)][voiced_mask]
     median_voiced_rms = float(np.median(voiced_rms)) if len(voiced_rms) else 0.0
     rms_gate = 0.25 * median_voiced_rms
-    # Window of +/-25 ms around an onset, in 10 ms frames.
     rms_half_win = 2
 
-    events = []
-
-    # Normalize strength per track
     max_strength = np.max(onset_env) if len(onset_env) > 0 else 1.0
-
+    events = []
     for peak in peaks:
-        # Align peak frame (22050Hz/10ms) to crepe frame (16000Hz/10ms)
-        peak_time = peak * hop_length / sr_analysis
-
-        crepe_frame = int(peak_time / 0.010)
-        crepe_frame = min(crepe_frame, len(periodicity) - 1)
-
-        onset_time = peak_time
+        peak_time = peak * hop_length / sr
+        crepe_frame = min(int(peak_time / _HOP_SECONDS), len(periodicity) - 1)
         strength = onset_env[peak] / max_strength
-        f0 = pitch[crepe_frame]
-        per = periodicity[crepe_frame]
-
-        # Strength gate: drop the weakest normalized onsets. These are usually
-        # separation artifacts / breaths that would become spurious taps.
         if strength < 0.12:
             continue
-
-        # RMS gate: drop onsets sitting in near-silence relative to the voiced
-        # level (breaths, sibilance, Demucs artifacts).
         if rms_gate > 0:
             lo = max(0, peak - rms_half_win)
             hi = min(len(rms), peak + rms_half_win + 1)
             local_rms = float(np.mean(rms[lo:hi])) if hi > lo else 0.0
             if local_rms < rms_gate:
                 continue
-
+        per = float(periodicity[crepe_frame]) if len(periodicity) else 0.0
         events.append({
-            "t": float(onset_time),
+            "t": float(peak_time),
             "strength": float(strength),
-            "f0": float(f0),
-            "periodicity": float(per),
-            "dur": 0.1
+            "f0": float(pitch[crepe_frame]) if len(pitch) else 0.0,
+            "periodicity": per,
+            "dur": 0.1,
+            # Flux onsets carry no nucleus/consonant distinction, so they are
+            # typed by voicing alone and the flow layer treats them as syllables.
+            "kind": "nucleus",
+            "subtype": "voiced" if per >= 0.35 else "plosive",
+            "stress": float(strength),
         })
-
     return events
+
+
+def detect_syllables(vocals_wav: str):
+    """Detect syllable events on the vocal stem.
+
+    Returns ``{"events": [...], "detector": "nucleus"|"flux", "warning": str|None}``.
+
+    Each event is::
+
+        {"t": 12.418, "strength": 0.72, "f0": 148.3, "periodicity": 0.81,
+         "dur": 0.19, "kind": "nucleus"|"transient",
+         "subtype": "voiced"|"sibilant"|"plosive", "stress": 0.64}
+
+    ``t`` is the syllable's **attack** and is the only timing the flow layer
+    ever uses - no stage downstream is allowed to move a flow hit off it.
+    """
+    import rhythm
+
+    params = _syllable_params()
+
+    y, sr = librosa.load(vocals_wav, sr=_ANALYSIS_SR, mono=True)
+    hop_length = int(sr * _HOP_SECONDS)
+    fps = sr / float(hop_length)
+
+    mag = np.abs(librosa.stft(y, n_fft=_N_FFT, hop_length=hop_length))
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=_N_FFT)
+    n_frames = mag.shape[1]
+
+    pitch, periodicity = _crepe_pitch(y, sr)
+    pitch = _align_to_frames(pitch, n_frames)
+    periodicity = _align_to_frames(periodicity, n_frames)
+
+    warning = None
+    detector = params["detector"] if params["detector"] in ("nucleus", "flux") else "nucleus"
+
+    events = []
+    if detector == "nucleus":
+        attack_env = _vowel_band_attack_envelope(y, sr, hop_length)
+        nuclei = _nucleus_events(mag, freqs, fps, periodicity, pitch, params,
+                                 attack_env_db=attack_env)
+        voiced_seconds = float(np.sum(periodicity >= params["voiced_threshold"])) / fps
+        rate = (len(nuclei) / voiced_seconds) if voiced_seconds > 0 else 0.0
+        if not nuclei or rate < _MIN_NUCLEI_PER_VOICED_SECOND:
+            warning = (
+                f"Nucleus syllable detector produced {len(nuclei)} events "
+                f"({rate:.2f}/voiced-second); fell back to the spectral-flux detector."
+            )
+            logger.warning(warning)
+            detector = "flux"
+        else:
+            transients = []
+            if params["transient_enabled"]:
+                transients = _transient_events(
+                    mag, freqs, fps, periodicity, pitch, params,
+                    [e["t"] for e in nuclei],
+                )
+            # Safety net applied *within* each kind: nuclei are already
+            # one-per-syllable, so grouping across the whole stream (as the old
+            # pipeline did) would silently drop consonant events.
+            events = (
+                rhythm.group_events(nuclei, min_gap=_EVENT_GROUP_MIN_GAP)
+                + rhythm.group_events(transients, min_gap=_EVENT_GROUP_MIN_GAP)
+            )
+
+    if detector == "flux":
+        events = rhythm.group_events(
+            _flux_events(y, sr, pitch, periodicity), min_gap=_EVENT_GROUP_MIN_GAP
+        )
+
+    events.sort(key=lambda e: e["t"])
+    logger.info(
+        "detect: %d events (%s detector)", len(events), detector
+    )
+    return {"events": events, "detector": detector, "warning": warning}
+
 
 import mido
 import pyloudnorm as pyln
@@ -396,12 +789,23 @@ def _apply_duck(inst, env, sr, band_limited):
 
 
 # Roles that duck the instrumental (kick & snare); hats/cymbals/toms do not.
+# Membership in this set is *not* sufficient on its own: the duck is driven only
+# by notes whose ``layer`` is "bed". Flow ghosts are quiet snares, so a
+# class-only test would make every ghost note pump the instrumental.
 _DUCKING_CLASSES = ("kick", "snare")
+_DUCKING_LAYER = "bed"
 
 # Clamp per-beat tempi derived from beat tracking to a sane BPM range so a
 # spurious beat interval can't emit an absurd MIDI tempo.
 _MIDI_MIN_BPM = 20.0
 _MIDI_MAX_BPM = 320.0
+
+# Static carve in the instrumental under the kit's kick, always on. Cutting a
+# narrow notch where the sampled kick's fundamental sits makes room for it
+# without the blunt whole-low-band duck the old render used.
+_KICK_NOTCH_DB = -3.0
+_KICK_NOTCH_Q = 1.4
+_KICK_NOTCH_FALLBACK_HZ = 65.0
 
 
 def _build_midi_tempo_map(beat_times, ticks_per_beat, fallback_tempo_us):
@@ -458,62 +862,121 @@ def _build_midi_tempo_map(beat_times, ticks_per_beat, fallback_tempo_us):
     return tempo_changes, sec_to_tick
 
 
-def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
-                  kit_dir: str = None, duck_floor: float = None,
-                  duck_release_ms: float = None, duck_band_limited: bool = None):
-    """Render a drum score to audio and mix it with the instrumental.
+def _resolve(value, env_name, default, cast=float):
+    """Resolve a render tunable: explicit argument, then env, then default."""
+    if value is not None:
+        try:
+            return cast(value) if cast is not bool else _as_bool(value)
+        except (TypeError, ValueError):
+            return default
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        return cast(raw) if cast is not bool else _as_bool(raw)
+    except (TypeError, ValueError):
+        return default
 
-    This is the *sound* layer: the drum score (from the ``groove`` stage) is
-    played back through the velocity-layered, round-robin real-sample engine in
-    :mod:`sampler`. The vocal-locked timing in the score is preserved verbatim -
-    no quantization happens here. Kick and snare hits duck a band-limited copy of
-    the instrumental, then the mix is loudness-normalized to -14 LUFS.
 
-    Writes ``mix.wav``, ``mix_perc_only.wav``, ``mix_inst_only.wav`` and the
-    ``.mid`` export (built from the score with real tempo meta), matching the
-    previous output shape. Returns ``(mix, midi, perc_only, inst_only)`` paths.
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ('0', 'false', 'no', 'off')
+
+
+def _kick_notch_hz(kit):
+    """Dominant low frequency of the kit's loudest kick sample."""
+    import bus as _bus
+
+    layers = kit.layers.get("kick") or []
+    if not layers:
+        return _KICK_NOTCH_FALLBACK_HZ
+    variants = layers[-1]  # loudest velocity layer
+    if not variants:
+        return _KICK_NOTCH_FALLBACK_HZ
+    return _bus.dominant_frequency(variants[0], kit.sr) or _KICK_NOTCH_FALLBACK_HZ
+
+
+def _remap_missing_classes(notes, kit):
+    """Fall back to ``hat_closed`` for flow classes the kit does not ship.
+
+    ``FLOW_ACCENT_CLASS`` defaults to ``ride`` because ``kits/default`` has no
+    rim/side-stick samples; a kit that also lacks a ride would otherwise lose
+    every accent silently. Validated here, at render time, because this is the
+    first point where the kit is actually loaded.
     """
+    warned = set()
+    out = []
+    for note in notes:
+        drum_class = note.get("drum_class")
+        if (drum_class and note.get("layer") == "flow" and not kit.has(drum_class)
+                and kit.has(_sampler_fallback_class())):
+            if drum_class not in warned:
+                logger.warning(
+                    "Kit has no %r samples; flow hits fall back to %r.",
+                    drum_class, _sampler_fallback_class(),
+                )
+                warned.add(drum_class)
+            note = dict(note)
+            note["drum_class"] = _sampler_fallback_class()
+            note["midi_note"] = _class_to_midi()[_sampler_fallback_class()]
+        out.append(note)
+    return out
+
+
+def _sampler_fallback_class():
+    import flow as _flow
+    return _flow.ACCENT_FALLBACK_CLASS
+
+
+def _class_to_midi():
     import sampler as _sampler
+    return _sampler.CLASS_TO_MIDI
 
-    if duck_floor is None:
-        duck_floor = float(os.environ.get('DUCK_FLOOR', 0.7))
-    if duck_release_ms is None:
-        duck_release_ms = float(os.environ.get('DUCK_RELEASE_MS', 80.0))
-    if duck_band_limited is None:
-        env_v = os.environ.get('DUCK_BAND_LIMITED')
-        duck_band_limited = (env_v.strip().lower() not in ('0', 'false', 'no', 'off')
-                             if env_v is not None else True)
-    if kit_dir is None:
-        kit_dir = os.environ.get('KIT_DIR', _sampler.DEFAULT_KIT_DIR)
 
-    inst, sr = sf.read(instrumental_wav)
-    if len(inst.shape) == 1:
-        inst = np.column_stack((inst, inst))
+def balance_sub_buses(sub_buses: dict, layer_balance: float):
+    """Sum the flow/bed sub-buses with equal-power balance gains.
 
-    notes = drum_score.get('notes', []) if isinstance(drum_score, dict) else drum_score
-    tempo = float(drum_score.get('tempo', 0.0)) if isinstance(drum_score, dict) else 0.0
-    beat_times = drum_score.get('beat_times') if isinstance(drum_score, dict) else None
+    Separated out because this is where "total percussion level" exists as a
+    single thing: downstream the mix goes through a program-dependent limiter
+    and loudness normalization, whose time-varying gain is shared with the
+    instrumental and therefore cannot be used to reason about the balance law.
+    """
+    import bus as _bus
 
-    # Play the score through the real-sample engine.
-    kit = _sampler.DrumKit.load(kit_dir, sr)
-    perc_track, placed = _sampler.render_drum_score(notes, len(inst), sr, kit)
+    flow_gain, bed_gain = _bus.layer_gains(layer_balance)
+    gains = {"flow": flow_gain, "bed": bed_gain}
+    total = None
+    for name, buf in sub_buses.items():
+        scaled = (buf * gains.get(name, bed_gain)).astype(np.float32)
+        total = scaled if total is None else total + scaled
+    return total if total is not None else np.zeros((0, 2), dtype=np.float32)
 
-    # Match lengths: pad the instrumental if a drum tail runs past its end.
-    if len(perc_track) > len(inst):
-        pad = np.zeros((len(perc_track) - len(inst), inst.shape[1]), dtype=inst.dtype)
-        inst = np.vstack((inst, pad))
-    elif len(perc_track) < len(inst):
-        pad = np.zeros((len(inst) - len(perc_track), 2), dtype=perc_track.dtype)
-        perc_track = np.vstack((perc_track, pad))
 
-    # Sidechain-style ducking envelope driven by kick/snare hits.
-    duck_envelope = np.ones(len(inst))
+def _bed_duck_envelope(placed, n_samples, sr, duck_floor, duck_release_ms):
+    """Ducking envelope driven **only** by bed kick/snare hits."""
+    env = np.ones(n_samples)
     attack_samples = int(sr * 0.005)
     release_samples = int(sr * duck_release_ms / 1000.0)
+    for a in placed:
+        if a.get("layer") != _DUCKING_LAYER:
+            continue
+        if a["drum_class"] not in _DUCKING_CLASSES:
+            continue
+        idx = int(a['t'] * sr)
+        a0 = max(0, idx - attack_samples)
+        if idx > a0:
+            ramp = np.linspace(1.0, duck_floor, idx - a0)
+            env[a0:idx] = np.minimum(env[a0:idx], ramp)
+        r_end = min(n_samples, idx + release_samples)
+        if r_end > idx:
+            rel = np.linspace(duck_floor, 1.0, r_end - idx)
+            env[idx:r_end] = np.minimum(env[idx:r_end], rel)
+    return env
 
-    # MIDI export from the drum score. When the score carries the tracked beat
-    # times, a drifting tempo map is written so a DAW's bar grid follows the
-    # song's tempo changes; otherwise a single tempo meta is used.
+
+def _write_midi(placed, tempo, beat_times, midi_path):
+    """Export the placed score as a .mid with a drifting tempo map."""
     mid = mido.MidiFile()
     track = mido.MidiTrack()
     mid.tracks.append(track)
@@ -524,21 +987,6 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
     tempo_changes, sec_to_tick = _build_midi_tempo_map(
         beat_times, ticks_per_beat, fallback_tempo_us)
     note_len_ticks = max(1, ticks_per_beat // 8)
-
-    # Ducking envelope is driven off audio-sample positions (absolute seconds),
-    # independent of the MIDI tick grid.
-    placed.sort(key=lambda a: a['t'])
-    for a in placed:
-        idx = int(a['t'] * sr)
-        if a['drum_class'] in _DUCKING_CLASSES:
-            a0 = max(0, idx - attack_samples)
-            if idx > a0:
-                ramp = np.linspace(1.0, duck_floor, idx - a0)
-                duck_envelope[a0:idx] = np.minimum(duck_envelope[a0:idx], ramp)
-            r_end = min(len(duck_envelope), idx + release_samples)
-            if r_end > idx:
-                rel = np.linspace(duck_floor, 1.0, r_end - idx)
-                duck_envelope[idx:r_end] = np.minimum(duck_envelope[idx:r_end], rel)
 
     # Merge tempo metas and note on/off events on an absolute-tick timeline, then
     # emit them in order as delta times. Rank orders ties at the same tick so a
@@ -564,42 +1012,171 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
         track.append(builder(delta))
         last_tick = abs_tick
 
-    midi_path = output_mix_wav.replace('.wav', '.mid')
     mid.save(midi_path)
+    return midi_path
 
-    perc_only_path = output_mix_wav.replace('.wav', '_perc_only.wav')
 
-    # Mix: duck the (low band of the) instrumental around kick/snare hits, then
-    # layer percussion on top.
-    ducked_inst = _apply_duck(inst, duck_envelope, sr, duck_band_limited)
-    mix = ducked_inst + perc_track
+def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
+                  kit_dir: str = None, duck_floor: float = None,
+                  duck_release_ms: float = None, duck_band_limited: bool = None,
+                  layer_balance: float = None, drum_drive: float = None,
+                  drum_room: float = None, drum_glue: bool = None,
+                  limiter_ceiling_dbtp: float = None,
+                  render_layer_stems: bool = None):
+    """Render a drum score to audio and mix it with the instrumental.
 
-    # Loudness normalization to -14 LUFS.
+    This is the *sound* layer. The score's vocal-locked timing is preserved
+    verbatim — no quantization happens here, and no hit is moved — but the kit
+    no longer sits *on top of* a mastered record:
+
+    * the two layers render into separate sub-buses, each transient-shaped per
+      class, soft-clip saturated and given a short (fixed-seed) room send;
+    * ``layer_balance`` mixes them with equal-power gains, so the total
+      percussion level stays put across the sweep and the control changes only
+      the balance. It is a **bus gain**, which is why changing it invalidates
+      only the render cache and a re-render takes seconds;
+    * the summed percussion bus gets glue compression;
+    * the instrumental gets a static notch at the kit kick's own fundamental
+      plus the existing envelope duck — now driven **only** by ``layer: "bed"``
+      kick and snare hits, since flow ghosts are snares and would otherwise make
+      the bed pump on every syllable;
+    * a real true-peak limiter replaces the old whole-mix gain multiply, then
+      the mix is loudness-normalized to -14 LUFS.
+
+    Writes ``mix.wav``, ``mix_perc_only.wav``, ``mix_inst_only.wav`` and the
+    ``.mid`` export. With ``RENDER_LAYER_STEMS=1`` it additionally writes
+    ``mix_flow_only.wav`` / ``mix_bed_only.wav`` for local debugging (these are
+    not uploaded). Returns ``(mix, midi, perc_only, inst_only)`` paths.
+    """
+    import sampler as _sampler
+    import bus as _bus
+
+    duck_floor = _resolve(duck_floor, 'DUCK_FLOOR', 0.7)
+    duck_release_ms = _resolve(duck_release_ms, 'DUCK_RELEASE_MS', 80.0)
+    duck_band_limited = _resolve(duck_band_limited, 'DUCK_BAND_LIMITED', True, bool)
+    layer_balance = _resolve(layer_balance, 'LAYER_BALANCE', 0.5)
+    drum_drive = _resolve(drum_drive, 'DRUM_DRIVE', 1.6)
+    drum_room = _resolve(drum_room, 'DRUM_ROOM', 0.14)
+    drum_glue = _resolve(drum_glue, 'DRUM_GLUE', True, bool)
+    ceiling_dbtp = _resolve(limiter_ceiling_dbtp, 'LIMITER_CEILING_DBTP', -1.0)
+    layer_stems = _resolve(render_layer_stems, 'RENDER_LAYER_STEMS', False, bool)
+    if kit_dir is None:
+        kit_dir = os.environ.get('KIT_DIR', _sampler.DEFAULT_KIT_DIR)
+
+    inst, sr = sf.read(instrumental_wav)
+    if len(inst.shape) == 1:
+        inst = np.column_stack((inst, inst))
+
+    notes = drum_score.get('notes', []) if isinstance(drum_score, dict) else drum_score
+    tempo = float(drum_score.get('tempo', 0.0)) if isinstance(drum_score, dict) else 0.0
+    beat_times = drum_score.get('beat_times') if isinstance(drum_score, dict) else None
+
+    kit = _sampler.DrumKit.load(kit_dir, sr)
+    notes = _remap_missing_classes(notes, kit)
+
+    # 1. Two sub-buses, with per-class transient shaping on each one-shot.
+    sub_buses, placed = _sampler.render_drum_score(
+        notes, len(inst), sr, kit,
+        shaper=lambda sample, cls: _bus.shape_sample(sample, sr, cls),
+        split_layers=True,
+    )
+    placed.sort(key=lambda a: a['t'])
+
+    total_len = max([len(b) for b in sub_buses.values()] + [len(inst)])
+    if len(inst) < total_len:
+        pad = np.zeros((total_len - len(inst), inst.shape[1]), dtype=inst.dtype)
+        inst = np.vstack((inst, pad))
+
+    # 2-3. Saturation and room send, per sub-bus. One IR instance, generated
+    # from a fixed seed, so identical inputs render identically.
+    room_impulse = _bus.room_ir(sr) if drum_room else None
+    processed = {}
+    for name, buf in sub_buses.items():
+        if len(buf) < total_len:
+            buf = np.vstack((buf, np.zeros((total_len - len(buf), 2),
+                                           dtype=buf.dtype)))
+        buf = _bus.saturate(buf, drum_drive)
+        if drum_room:
+            buf = _bus.room_send(buf, sr, drum_room, ir=room_impulse)
+        processed[name] = buf
+
+    # 4. Equal-power balance, then sum to one percussion bus.
+    flow_gain, bed_gain = _bus.layer_gains(layer_balance)
+    flow_bus = processed.get("flow")
+    bed_bus = processed.get("bed")
+    perc_track = balance_sub_buses(processed, layer_balance)
+
+    # 5. Bus glue on the summed percussion.
+    if drum_glue:
+        perc_track = _bus.glue_compress(perc_track, sr)
+
+    # 6. Bed processing: static kick carve + bed-driven envelope duck.
+    notch_hz = _kick_notch_hz(kit)
+    inst_processed = _bus.peaking_eq(inst, sr, notch_hz, _KICK_NOTCH_DB,
+                                     _KICK_NOTCH_Q)
+    duck_envelope = _bed_duck_envelope(placed, total_len, sr, duck_floor,
+                                       duck_release_ms)
+    inst_processed = _apply_duck(inst_processed, duck_envelope, sr,
+                                 duck_band_limited)
+
+    midi_path = _write_midi(placed, tempo, beat_times,
+                            output_mix_wav.replace('.wav', '.mid'))
+
+    mix = inst_processed + perc_track
+
+    # 7. True-peak limiter *before* loudness normalization, then re-measure and
+    # normalize, then a second pass as the safety clamp. Every gain is applied
+    # identically to the stems so `perc + inst` still equals `mix` (the player
+    # sums the two stems at unity).
+    stems = [perc_track, inst_processed]
+    if layer_stems:
+        stems += [
+            (flow_bus if flow_bus is not None else np.zeros_like(perc_track)) * flow_gain,
+            (bed_bus if bed_bus is not None else np.zeros_like(perc_track)) * bed_gain,
+        ]
+
+    def _apply_gain(g):
+        nonlocal mix, stems
+        if np.isscalar(g):
+            mix = mix * g
+            stems = [s * g for s in stems]
+        else:
+            mix = mix * g[:, np.newaxis]
+            stems = [s * g[:, np.newaxis] for s in stems]
+
+    _apply_gain(_bus.true_peak_gain(mix, sr, ceiling_dbtp))
+
+    # Normalize, then limit again as the safety clamp — and repeat, because the
+    # second limiter pass is program-dependent and can itself pull the loudness
+    # back down (heavily transient material cannot reach -14 LUFS under a
+    # -1 dBTP ceiling in one pass). Two or three iterations converge; the loop
+    # exits as soon as the measurement is on target.
     meter = pyln.Meter(sr)
-    loudness = meter.integrated_loudness(mix)
-    gain_db = -14.0 - loudness
-    gain_linear = 10.0 ** (gain_db / 20.0)
+    for _ in range(3):
+        loudness = meter.integrated_loudness(mix)
+        if not np.isfinite(loudness):
+            break
+        gain_db = -14.0 - loudness
+        if abs(gain_db) < 0.1:
+            break
+        _apply_gain(10.0 ** (gain_db / 20.0))
+        _apply_gain(_bus.true_peak_gain(mix, sr, ceiling_dbtp))
 
-    normalized_mix = mix * gain_linear
-    normalized_perc = perc_track * gain_linear
-    normalized_inst = ducked_inst * gain_linear
-
-    # Safety limiter / true-peak guard. Loudness-normalizing a drum layer on top
-    # of the bed can push peaks past 0 dBFS, which clips and adds crackle. If the
-    # mix exceeds the ceiling, pull the whole mix down by the overshoot (applied
-    # equally to the stems so their relationship is preserved) so nothing clips.
-    ceiling = 0.985
-    peak = float(np.max(np.abs(normalized_mix))) if normalized_mix.size else 0.0
+    ceiling = 10.0 ** (ceiling_dbtp / 20.0)
+    peak = float(np.max(np.abs(mix))) if mix.size else 0.0
     if peak > ceiling:
-        limiter_gain = ceiling / peak
-        normalized_mix = normalized_mix * limiter_gain
-        normalized_perc = normalized_perc * limiter_gain
-        normalized_inst = normalized_inst * limiter_gain
+        _apply_gain(ceiling / peak)
 
-    sf.write(output_mix_wav, normalized_mix, sr)
-    sf.write(perc_only_path, normalized_perc, sr)
+    perc_out, inst_out = stems[0], stems[1]
 
+    sf.write(output_mix_wav, mix, sr)
+    perc_only_path = output_mix_wav.replace('.wav', '_perc_only.wav')
     inst_only_path = output_mix_wav.replace('.wav', '_inst_only.wav')
-    sf.write(inst_only_path, normalized_inst, sr)
+    sf.write(perc_only_path, perc_out, sr)
+    sf.write(inst_only_path, inst_out, sr)
+
+    if layer_stems:
+        sf.write(output_mix_wav.replace('.wav', '_flow_only.wav'), stems[2], sr)
+        sf.write(output_mix_wav.replace('.wav', '_bed_only.wav'), stems[3], sr)
 
     return output_mix_wav, midi_path, perc_only_path, inst_only_path
