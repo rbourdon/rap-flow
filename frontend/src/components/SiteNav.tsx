@@ -3,19 +3,7 @@ import { auth } from '@/lib/auth'
 import { headers } from 'next/headers'
 import { AuthForm } from '@/components/AuthForm'
 import { SignOutButton } from '@/components/SignOutButton'
-
-// The app's single logo mark, reused in the nav and footer.
-function LogoMark({ className = '' }: { className?: string }) {
-  return (
-    <div className={`rounded-xl bg-gradient-to-tr from-indigo-500 to-cyan-400 flex items-center justify-center ${className}`}>
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M6 3v18" />
-        <path d="M12 7v10" />
-        <path d="M18 10v4" />
-      </svg>
-    </div>
-  )
-}
+import { LogoMark } from '@/components/LogoMark'
 
 // Shared top navigation rendered on every page from the root layout. Shows the
 // app identity plus auth state (sign-in button, or the user's name + sign out).

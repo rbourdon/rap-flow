@@ -1,0 +1,23 @@
+<!-- rap-flow brand mark — keep in sync with src/components/LogoMark.tsx -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <defs>
+    <linearGradient id="rapFlowTile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1" />
+      <stop offset="0.5" stop-color="#a855f7" />
+      <stop offset="1" stop-color="#22d3ee" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="12" fill="url(#rapFlowTile)" />
+  <rect x="0.5" y="0.5" width="31" height="31" rx="11.5" fill="none" stroke="#ffffff" stroke-opacity="0.2" />
+  <!-- vocal flow resolving into a quantized pulse, drawn as one unbroken path -->
+  <g transform="translate(3.52 3.52) scale(1.04)">
+    <path
+      d="M2.6 12c1.05-4.4 3.15-4.4 4.2 0s3.15 4.4 4.2 0V8.1h3.6v7.8h3.6V12h3.2"
+      fill="none"
+      stroke="#ffffff"
+      stroke-width="2.2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+</svg>
