@@ -18,22 +18,27 @@ ingest -> separate -> detect -> groove -> render -> finalize
 - **Per-stage workers.** Each stage is its own Modal function (`worker.py`) with
   a resource profile suited to its work: `ingest`, `groove` and `render` run on
   cheap CPU containers, while `separate` (Demucs) and `detect` (torchcrepe) get a
-  GPU. The `groove` stage additionally runs in its **own image** with Magenta
-  baked in (see below), isolated from the demucs/torch worker image. Every stage
-  has its own timeout and is retried independently.
+  GPU. There is a **single image** — the second, Magenta/TensorFlow one that used
+  to exist purely for the `groove` stage went away with GrooVAE. Every stage has
+  its own timeout and is retried independently.
 - **Durable artifacts + download reuse.** Every stage writes its outputs to a
   persistent Modal Volume (`rap-flow-artifacts`, mounted at `/artifacts`) under a
   key derived from the *content of its inputs* (see `workflow.py`). The ingest
   key is the normalized source id (e.g. the bare YouTube video id), so a second
   job on the same source — or any retry — **reuses the existing download instead
-  of re-downloading**. Stems are keyed by the input audio hash and the render by
-  the render parameters, so nothing stale is ever served.
+  of re-downloading**. Stems are keyed by the input audio hash, the event list by
+  the detector parameters, the drum score by the drum-stem and event hashes, and
+  the render by the render parameters, so nothing stale is ever served. A
+  `PIPELINE_VERSION` constant feeds the detect and groove keys, so a change to
+  either artifact *format* invalidates them rather than handing an old-format
+  file to new code.
 - **Retry / reprocess individual stages.** The orchestrator accepts a
   `fromStage` argument: stages before it are near-free cache hits, while that
   stage and everything after it are forced to recompute. This lets you, for
-  example, re-render with different ducking/quantization settings while reusing
-  the already-separated stems. Changing render parameters yields a fresh render
-  cache key, so a reprocess never returns a stale mix.
+  example, re-render at a different flow/backbone balance while reusing the
+  already-separated stems, the syllables and the drum score — which is exactly
+  what the result page's balance slider does. Changing render parameters yields a
+  fresh render cache key, so a reprocess never returns a stale mix.
 - **Thin frontend.** The Next.js app only *triggers* runs (optionally at a
   specific stage / with parameter overrides) via the `web_trigger` endpoint and
   receives signed progress callbacks — it never owns the workflow state machine.
@@ -42,44 +47,84 @@ The pure stage/caching logic lives in `workflow.py` (no Modal-specific code), so
 it is reused unchanged by both `worker.py` (each stage wrapped in a Modal
 function) and `cli.py` (run locally, in-process).
 
-## Percussion synthesis
+## Percussion
 
-Percussion is generated in **two stages** — a *decision* layer that decides which
-drum plays when, and a *sound* layer that plays real samples — so the vocal
-onsets stay the rhythmic source of truth and the drums are actual recorded (or
-high-quality synthesized) one-shots rather than per-syllable beeps.
+**Every hit traces either to a syllable or to the record's own beat.** Nothing is
+sampled from a model, so nothing drifts. This is the load-bearing rule of the
+whole percussion path, and one invariant sits above all the others:
 
-### 1. `groove` — syllable events → drum score (GrooVAE tap2drum)
+> No code path may move a flow-layer hit off its source syllable's time.
 
-- **GrooVAE tap2drum.** The vocal onsets are turned into a monophonic *tap*
-  sequence at their **raw onset times** (velocity from onset strength — no global
-  quantization, so the drums stay locked to the voice), then fed in 2-bar windows
-  through Magenta's `groovae_2bar_tap_fixed_velocity` model. The model expands the
-  taps into a full 9-class drum performance (kick, snare, closed/open hat, three
-  toms, crash, ride) with per-note velocity and micro-timing. The instrumental is
-  beat-tracked (`librosa.beat.beat_track`), and the resulting **beat times** — not
-  just a single global BPM — drive the model path so it tracks tempo changes: each
-  2-bar window is cut at *actual* beat boundaries (every 8 beats) and the model's
-  fixed 120 BPM output is rescaled into that window's own real duration, then
-  soft-snapped to the local (drift-following) 16th grid. Tracks with a degenerate
-  beat grid fall back to uniform windows at the global tempo.
-- **Isolated environment.** Magenta pins an old TensorFlow that conflicts with the
-  demucs/torch worker image, so the model call lives in `groovae.py` and runs in a
-  **separate Modal function with its own image** (Magenta + note-seq, checkpoint
-  baked in at build time). None of those dependencies touch the main worker image;
-  `groove.py` imports `groovae` lazily.
-- **Heuristic fallback.** If the model is disabled (`GROOVE_ENABLED=0`),
-  unavailable (e.g. Magenta not installed locally), or fails for any reason, a
-  metrical heuristic maps the onsets to drums instead — kicks on beats 1 & 3,
-  snares on 2 & 4, hats on the subdivisions, open hats on the off-beats, and a
-  crash at phrase starts — so a job **never fails because of Magenta**. The
-  fallback is surfaced as a non-fatal warning in the stage state.
-- **Output.** The drum score (`{t, midi_note, velocity, drum_class}` list plus
-  tempo) is saved as `drum_score.json` and is the single source of truth for both
-  MIDI export and sample rendering. `GROOVE_TEMPERATURE` (default `0.5`) controls
-  the model's sampling temperature.
+`backend/tests/test_flow.py` asserts it with float **equality**, not a tolerance.
 
-### 2. `render` — drum score → audio (real-sample sampler)
+### 1. `detect` — vocal stem → syllable events
+
+Two detectors run side by side on the Demucs vocal stem (`pipeline.py`):
+
+- **Vowel nuclei (voiced syllables).** The ~300–3400 Hz band energy is converted
+  to dB and smoothed over ~50 ms; frames below `SYL_VOICED_THRESHOLD`
+  periodicity (from `torchcrepe`) are floored so breaths and separation hiss
+  cannot form peaks. Peaks in what is left are the syllable nuclei — one per
+  syllable. Peak prominence is gated relative to the **track's own** P90−P10
+  envelope range, which is what makes the detector hold across tracks where the
+  old fixed `delta=0.05` did not, and it is measured on the *unmasked* envelope
+  so a peak next to a voicing boundary can't inherit that cliff's prominence.
+- **`t` is the attack, not the nucleus.** Drums have to hit where the syllable
+  *starts*; using the loudness peak would place every hit late by roughly half a
+  vowel. The attack is the steepest rise in the 80 ms before the peak, found on a
+  high-time-resolution bandpass+RMS envelope (the 50 ms smoothing that makes
+  peak-picking robust would smear the onset ~30 ms early).
+- **Transients (unvoiced consonants).** High-band (≥ 4 kHz) flux peaks on
+  unvoiced frames, sub-classified by HF decay length into `sibilant` or
+  `plosive`, and suppressed within 45 ms *before* a nucleus attack (that is the
+  syllable's own onset consonant, already represented by the nucleus).
+- **Strength and stress.** `strength` is the prominence over the track's **P95**
+  (not its max — one outlier peak used to compress every other strength toward
+  zero); `stress` is prominence relative to a 2 s moving window, so a quiet
+  passage still gets its own accents.
+- **Fallback.** The previous spectral-flux detector is kept as `_flux_events`.
+  If the nucleus detector returns nothing, or under 0.8 events per voiced second,
+  it takes over and a non-fatal warning is surfaced. `SYL_DETECTOR=flux` forces
+  it explicitly.
+
+Events keep their original keys and add `kind` (`nucleus` | `transient`),
+`subtype` (`voiced` | `sibilant` | `plosive`) and `stress`.
+
+### 2. `groove` — events + drums stem → drum score (two layers)
+
+- **Flow layer** (`flow.py`) — one event, one hit, at the event's `t` verbatim.
+  No quantization, no grid snapping, no per-bar caps: the syllables already
+  encode the density. A stressed syllable (top 15% of a 2 s window) gets
+  `FLOW_ACCENT_CLASS` (default `ride`); any other voiced syllable gets a quiet
+  `snare` *ghost*; sibilants and plosives get closed hats, the sibilant closing a
+  phrase gets an open hat, and a phrase start with high stress adds a `crash`
+  alongside its own hit. The only culling is a per-class `FLOW_MIN_GAP_MS` gap,
+  keeping the louder hit, so samples can't stack on themselves. Every note
+  carries `event_index`, a back-reference into the detect stage's array.
+- **Groove bed** (`backbone.py`) — the kick and snare are **transcribed from the
+  song's own `drums.wav`**, a stem `separate_audio` has always written and
+  `workflow.py` has always cached but nothing consumed. Band envelopes (low
+  30–120 Hz, body+noise 150–450 Hz plus 1–6 kHz, high ≥ 6 kHz) are onset-detected
+  and classified by band-energy ratio; a kick and a snare on the same instant are
+  both kept. A grid sanity pass then **soft-snaps** onto the nearest 16th only
+  within `BACKBONE_SNAP_MS` (so the record's own push and pull survives but
+  detector jitter doesn't), fills a missing backbeat snare / beat-1 kick
+  (`BACKBONE_FILL`, tagged `source: "filled"`), and clamps obvious band bleed.
+  Too-sparse transcription or a degenerate beat grid falls back to a grid
+  template (kick on 1 and the "and" of 3, snare on 2 and 4) with a warning.
+- **Layer split.** The bed owns kick and snare; the flow owns hats, ghosts and
+  accents. The old kick/snare-per-bar caps that demoted overflow to hats are gone
+  — the flow layer has classes of its own now.
+- **Merge** (`groove.py`) — a flow ghost `snare` within `MERGE_SNARE_GUARD_MS` of
+  a bed `snare` is dropped (the backbone wins, because it is the beat), choke
+  groups stay in the sampler and now operate across both layers, and the result
+  is sorted by time. The layer balance is deliberately **not** applied here: it
+  is a render bus gain, which is what makes the UI's fast re-render possible.
+- **Output.** `drum_score.json` carries `tempo`, `beat_times`,
+  `downbeat_offset`, the note list (each with `layer`, `source` and, for flow
+  notes, `event_index`), `model_used: false`, `warning` and `stats`.
+
+### 3. `render` — drum score → audio (real-sample sampler + bus chain)
 
 - **Velocity-layered, round-robin sampler.** `sampler.py` plays a kit of real
   one-shots laid out as `kits/<kit>/<drum_class>/v<layer>_rr<variant>.wav` (see
@@ -96,11 +141,39 @@ high-quality synthesized) one-shots rather than per-syllable beeps.
   kick/snare/hat_closed, one shot for the rest). Drop a real kit into any
   conforming folder and select it with `KIT_DIR` / `--kit` — no code changes
   needed. Regenerate the placeholders with `python kits/generate_default_kit.py`.
-- **Band-limited ducking.** Kick and snare hits (not hats) duck the instrumental.
-  The bed is split with a ~400 Hz Linkwitz-Riley crossover and only the low band
-  is ducked, so the mix doesn't pump. Each dip has a 5 ms attack ramp and a linear
-  release (default 80 ms) to a floor of `0.7` (~ -3 dB). Set `DUCK_BAND_LIMITED=0`
-  for full-band ducking with the same gentle envelope.
+- **Two sub-buses and a bus chain** (`bus.py`). The flow and bed layers render
+  into separate sub-buses so the balance can be applied before summing. Each
+  one-shot gets **per-class transient shaping** (attack emphasis over the first
+  ~8 ms, decay shortening for hats) applied to the buffer, so it stays cheap and
+  phase-safe. Each sub-bus is then soft-clip saturated
+  (`tanh(x·drive)/tanh(drive)`, `DRUM_DRIVE`, with output gain matched to input
+  RMS) and given a short synthetic early-reflection room send (`DRUM_ROOM`,
+  ~180 ms RT60, 12 ms pre-delay). **The room IR is generated from a fixed seed**
+  — the pipeline is content-addressed and cache-reused, so a random IR would make
+  identical inputs produce different renders. The summed bus then gets glue
+  compression (3:1 at −14 dBFS, 8 ms / 120 ms, makeup to unity RMS).
+- **Layer balance.** `LAYER_BALANCE` ∈ [0, 1] mixes the two sub-buses with
+  equal-power gains (`cos(b·π/2)`, `sin(b·π/2)`), so the *total* percussion level
+  stays put across the sweep and the control changes only the balance. It lives in
+  `RENDER_PARAM_KEYS`, so the result page's slider invalidates only the render.
+- **Bed processing.** A static notch at the kit kick's own dominant frequency
+  (measured from the sample, −3 dB, Q 1.4) makes room for the sampled kick
+  instead of the blunt whole-low-band duck. The envelope duck is retained, split
+  with a ~400 Hz Linkwitz-Riley crossover so only the low band moves — but it is
+  now driven **only by `layer: "bed"` kick and snare hits**. That is a correctness
+  requirement, not a preference: flow ghosts *are* snares, so the old
+  class-membership test would make every ghost note pump the instrumental.
+- **True-peak limiter.** 4× oversampled detection, 1.5 ms lookahead, 50 ms
+  release, ceiling `LIMITER_CEILING_DBTP`. It runs before loudness normalization,
+  then the mix is re-measured and normalized to −14 LUFS with the limiter re-run
+  as a safety clamp (iterated to convergence, because the second pass is
+  program-dependent). This replaces the old "if the mix peaks, multiply the whole
+  mix down" behaviour, which quietened everything the moment one drum peaked.
+  Every gain is applied identically to the stems, so `perc + inst` still
+  reconstructs `mix` — the player sums the two at unity.
+- **Layer stems.** `RENDER_LAYER_STEMS=1` additionally writes
+  `mix_flow_only.wav` and `mix_bed_only.wav` for auditioning the two layers
+  while tuning. Off by default and not uploaded.
 - **MIDI export.** The `.mid` file is built from the drum score with proper
   `ticks_per_beat` math, so it imports on-grid into a DAW with the full set of
   9-class drum notes and per-note velocities. When the score carries the tracked
@@ -149,12 +222,47 @@ These are read from the environment (in Modal, set them as secrets on the
 | `YT_PLAYER_CLIENT` | Comma-separated override for the yt-dlp player clients (e.g. `tv,web_safari`). Leave unset to use yt-dlp's maintained defaults. |
 | `MAX_SOURCE_DURATION_SEC` | Maximum accepted source duration in seconds (default `900`). |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob token used to upload results. |
-| `GROOVE_ENABLED` | Run the GrooVAE tap2drum model for the drum score (default on); set `0`/`false` to force the heuristic drum mapping. |
-| `GROOVE_TEMPERATURE` | GrooVAE sampling temperature (default `0.5`). |
-| `KIT_DIR` | Path to the drum kit directory used by the sampler (default: the bundled `kits/default`). See `kits/README.md`. |
-| `DUCK_FLOOR` | Ducking floor gain applied under kick/snare hits (default `0.7`, ~ -3 dB). |
-| `DUCK_RELEASE_MS` | Ducking release time in milliseconds (default `80`). |
-| `DUCK_BAND_LIMITED` | Duck only the low band via a ~400 Hz crossover when truthy (default on); set `0`/`false` for full-band ducking. |
+
+### Syllable detection (`detect`)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SYL_DETECTOR` | `nucleus` | `nucleus` (vowel nuclei) or `flux` (the old spectral-flux detector, retained as a fallback and an escape hatch). |
+| `SYL_MIN_GAP_MS` | `70` | Minimum spacing between nuclei. |
+| `SYL_PROMINENCE` | `0.28` | Peak prominence as a fraction of the track's own P90−P10 envelope range. |
+| `SYL_VOICED_THRESHOLD` | `0.35` | Periodicity above which a frame counts as voiced. |
+| `TRANSIENT_ENABLED` | `1` | Run the consonant/transient detector. |
+| `TRANSIENT_MIN_GAP_MS` | `40` | Minimum spacing between transients. |
+
+### Drum score (`groove`)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BACKBONE_SOURCE` | `drums` | `drums` (transcribe the song's own `drums.wav`) or `template` (a fixed pattern on the beat grid). |
+| `BACKBONE_SNAP_MS` | `25` | Soft-snap window for backbone hits. Keep it tight: the sampled kick plays over the record's own, so a wide snap makes them flam. |
+| `BACKBONE_FILL` | `1` | Insert a missing backbeat snare / beat-1 kick. |
+| `BACKBONE_HATS` | `0` | Let the backbone also play hats (the flow layer owns them by default). |
+| `FLOW_ACCENT_CLASS` | `ride` | Drum class for stressed syllables. A side stick is the idiomatic sound, but `kits/default` ships no rim samples; falls back to `hat_closed` if absent from the kit. |
+| `FLOW_MIN_GAP_MS` | `45` | Per-class minimum gap in the flow layer (the only culling it does). |
+| `MERGE_SNARE_GUARD_MS` | `60` | Flow ghosts suppressed this close to a bed snare. |
+
+### Render (`render`)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LAYER_BALANCE` | `0.5` | Default flow/backbone balance, 0–1. Overridden per render by the result page's slider. |
+| `DRUM_DRIVE` | `1.6` | Saturation drive on each percussion sub-bus. |
+| `DRUM_ROOM` | `0.14` | Room send wet level. |
+| `DRUM_GLUE` | `1` | Bus glue compressor. |
+| `LIMITER_CEILING_DBTP` | `-1.0` | True-peak ceiling. |
+| `RENDER_LAYER_STEMS` | `0` | Also write `mix_flow_only.wav` / `mix_bed_only.wav` locally (not uploaded). |
+| `KIT_DIR` | bundled `kits/default` | Path to the drum kit directory used by the sampler. See `kits/README.md`. |
+| `DUCK_FLOOR` | `0.7` | Ducking floor gain applied under **bed** kick/snare hits (~ -3 dB). |
+| `DUCK_RELEASE_MS` | `80` | Ducking release time in milliseconds. |
+| `DUCK_BAND_LIMITED` | `1` | Duck only the low band via a ~400 Hz crossover; set `0`/`false` for full-band ducking. |
+
+`GROOVE_ENABLED` and `GROOVE_TEMPERATURE` are **gone** — there is no model to
+enable or to sample from. Remove them from the `rap-flow-secrets` secret.
 
 ## Running locally
 
@@ -163,13 +271,14 @@ pip install -r requirements.txt
 python cli.py "https://youtu.be/VIDEO_ID" --outdir output
 ```
 
-Magenta is **not** in `requirements.txt` (it conflicts with the demucs/torch
-stack), so local runs automatically use the heuristic drum mapping. Pass
-`--no-groove` to force it explicitly, and `--kit /path/to/kit` to use a different
-drum kit:
+Local runs are the same code as production — there is no model to be missing.
+`--backbone template` swaps the transcribed backbone for a fixed grid pattern,
+`--layer-balance` sets the flow/backbone mix, `--layer-stems` also writes
+flow-only and bed-only stems for auditioning, and `--kit /path/to/kit` selects a
+different drum kit:
 
 ```bash
-python cli.py "https://youtu.be/VIDEO_ID" --outdir output --no-groove --kit kits/default
+python cli.py "https://youtu.be/VIDEO_ID" --outdir output --layer-balance 0.35 --layer-stems
 ```
 
 Intermediate artifacts are cached under `<outdir>/artifacts` (override with
@@ -181,3 +290,36 @@ re-render without re-downloading or re-separating:
 ```bash
 python cli.py "https://youtu.be/VIDEO_ID" --outdir output --from-stage render
 ```
+
+Each of the three rewritten stages is independently listenable this way, which is
+how they are tuned:
+
+```bash
+python cli.py <src> --outdir out --from-stage detect   # new event list onward
+python cli.py <src> --outdir out --from-stage groove   # new drum score onward
+python cli.py <src> --outdir out --from-stage render   # bus chain only, seconds
+```
+
+## Tests
+
+```bash
+pip install pytest
+python -m pytest tests/
+```
+
+`tests/` covers the alignment guarantee (float-equality between every flow note
+and its source syllable), the merge guard, backbone transcription and gap fill,
+the balance law, the limiter ceiling, bed-only ducking, the cache-key rules, and
+an end-to-end score→mix integration check on synthesised stems. The two stages
+that need the ML stack (`separate` → demucs, `detect` → torchcrepe) are covered
+by stubbing `pipeline._crepe_pitch`; a full end-to-end run is a `cli.py`
+listening pass.
+
+What the tests can't cover, and what to listen for:
+
+- does the flow read as the rapper's rhythm;
+- do the backbone and the record's own drums flam (if so, deepen
+  `drums_duck_db` further and keep `BACKBONE_SNAP_MS` tight — see
+  `separate_audio`'s docstring);
+- do the ghosts crowd the backbeat;
+- does the room make the kit sound in-place or washed.

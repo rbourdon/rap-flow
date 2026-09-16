@@ -23,11 +23,26 @@ def main():
              "reused from the cache). Omit to reuse every cached artifact.",
     )
     parser.add_argument(
-        "--no-groove",
+        "--backbone",
+        choices=["drums", "template"],
+        default=None,
+        help="Where the groove bed's kick/snare pattern comes from: 'drums' "
+             "transcribes the song's own separated drum stem (default), "
+             "'template' places a fixed pattern on the beat grid.",
+    )
+    parser.add_argument(
+        "--layer-balance",
+        type=float,
+        default=None,
+        help="Flow-versus-backbone balance, 0.0 (all syllable flow) to 1.0 "
+             "(all beat backbone). Default 0.5. This is a render bus gain, so "
+             "'--from-stage render' re-runs it in seconds.",
+    )
+    parser.add_argument(
+        "--layer-stems",
         action="store_true",
-        help="Skip the GrooVAE tap2drum model and use the built-in heuristic "
-             "drum mapping. Local runs without Magenta installed fall back to "
-             "the heuristic automatically; this forces it.",
+        help="Also write mix_flow_only.wav and mix_bed_only.wav, for auditioning "
+             "the two layers separately while tuning.",
     )
     parser.add_argument(
         "--kit",
@@ -41,10 +56,15 @@ def main():
     artifacts_root = args.artifacts or os.path.join(args.outdir, "artifacts")
     os.makedirs(artifacts_root, exist_ok=True)
 
-    # CLI flags mirror the GROOVE_ENABLED / KIT_DIR env vars via render params.
+    # CLI flags mirror the BACKBONE_SOURCE / LAYER_BALANCE / RENDER_LAYER_STEMS
+    # / KIT_DIR env vars via stage params.
     params = {}
-    if args.no_groove:
-        params["groove_enabled"] = False
+    if args.backbone:
+        params["backbone_source"] = args.backbone
+    if args.layer_balance is not None:
+        params["layer_balance"] = args.layer_balance
+    if args.layer_stems:
+        params["render_layer_stems"] = True
     if args.kit:
         params["kit"] = args.kit
 

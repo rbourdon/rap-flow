@@ -94,6 +94,11 @@ model Job {
   instOpusBlobUrl String?
   // The generated MIDI file (previously produced then discarded).
   midBlobUrl    String?
+  // Flow-versus-backbone balance last used for this job's render, 0 (all
+  // syllable flow) to 1 (all beat backbone). Persisted so the result page's
+  // slider restores where the listener left it. Null for jobs rendered before
+  // the control existed, which fall back to the backend default (0.5).
+  layerBalance  Float?
   // Source metadata captured during ingest (or the filename for uploads).
   title         String?
   thumbnailUrl  String?

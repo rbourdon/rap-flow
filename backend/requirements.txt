@@ -5,6 +5,7 @@ demucs
 librosa
 torchcrepe
 numpy
+scipy
 soundfile
 mido
 pyloudnorm

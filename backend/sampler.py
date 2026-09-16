@@ -198,15 +198,30 @@ def _velocity_gain(velocity):
     return float(min(0.98, 0.18 + 0.82 * (v ** 0.7)))
 
 
+DEFAULT_LAYER = "bed"
+
+
 def render_drum_score(drum_score, instrumental_len, sr, kit,
-                      rr_state=None, rng=None):
+                      rr_state=None, rng=None, shaper=None,
+                      split_layers=False):
     """Render a drum score to a stereo percussion track.
 
-    ``drum_score`` is a list of ``{t, midi_note, velocity, drum_class}`` dicts.
+    ``drum_score`` is a list of ``{t, midi_note, velocity, drum_class}`` dicts,
+    optionally carrying ``layer`` ("flow" | "bed") and ``source``.
     ``instrumental_len`` sizes the output buffer (extra tail is appended for the
     longest sample). Returns ``(perc_track, placed)`` where ``placed`` is a list
-    of ``{t, midi_note, velocity, drum_class}`` in play order (for MIDI export /
-    ducking). Round-robin cursors persist in ``rr_state`` (a dict) if supplied.
+    of ``{t, midi_note, velocity, drum_class, layer, source}`` in play order (for
+    MIDI export and for the bed-driven ducking envelope — the layer tag has to
+    survive to the render stage, because flow ghosts are snares and must not
+    pump the instrumental). Round-robin cursors persist in ``rr_state`` (a dict)
+    if supplied.
+
+    ``shaper(sample, drum_class) -> sample`` is applied to each one-shot buffer
+    before placement (per-class transient shaping; see :mod:`bus`).
+
+    With ``split_layers=True``, ``perc_track`` is a ``{layer: buffer}`` dict
+    instead of a single buffer, so the two layers can be processed and balanced
+    as separate sub-buses. Choke groups still operate **across** layers.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -222,10 +237,16 @@ def render_drum_score(drum_score, instrumental_len, sr, kit,
                 max_tail = max(max_tail, len(variant))
     last_idx = int(notes[-1]["t"] * sr) if notes else 0
     total_len = max(instrumental_len, last_idx + max_tail)
-    perc = np.zeros((total_len, 2), dtype=np.float32)
+
+    # Always render into per-layer sub-buses; they are summed on the way out
+    # unless the caller wants them separately.
+    layer_names = sorted({str(n.get("layer") or DEFAULT_LAYER) for n in notes}
+                         | {"flow", DEFAULT_LAYER})
+    buffers = {name: np.zeros((total_len, 2), dtype=np.float32)
+               for name in layer_names}
 
     # Active (still ringing) open-hat placements, so a later choke trigger can
-    # fade their tail. Each entry: (buffer_start, contribution_array).
+    # fade their tail. Each entry: (buffer, buffer_start, contribution_array).
     active_open_hats = []
     fade_len = int(sr * 0.010)  # 10 ms choke fade
 
@@ -238,21 +259,36 @@ def render_drum_score(drum_score, instrumental_len, sr, kit,
             continue
         velocity = int(note.get("velocity", 100))
         t = float(note["t"])
+        layer = str(note.get("layer") or DEFAULT_LAYER)
+        source = note.get("source")
         idx = int(t * sr)
         if idx < 0:
             continue
 
-        # Choke: a closed hat or kick silences any ringing open hat.
+        def _tag():
+            tag = {"t": t, "midi_note": CLASS_TO_MIDI.get(drum_class, 0),
+                   "velocity": velocity, "drum_class": drum_class,
+                   "layer": layer}
+            if source is not None:
+                tag["source"] = source
+            if note.get("event_index") is not None:
+                tag["event_index"] = note["event_index"]
+            return tag
+
+        # Choke: a closed hat or kick silences any ringing open hat. Chokes
+        # operate across both layers (a bed kick chokes a flow open hat).
         if drum_class in _CHOKE_TRIGGERS and active_open_hats:
-            _choke_open_hats(perc, active_open_hats, idx, fade_len)
+            _choke_open_hats(active_open_hats, idx, fade_len)
             active_open_hats = []
 
         if not kit.has(drum_class):
             # No sample for this class in the loaded kit; skip it but still keep
             # it in the MIDI/duck stream so downstream shape is preserved.
-            placed.append({"t": t, "midi_note": CLASS_TO_MIDI.get(drum_class, 0),
-                           "velocity": velocity, "drum_class": drum_class})
+            placed.append(_tag())
             continue
+
+        target = buffers.setdefault(
+            layer, np.zeros((total_len, 2), dtype=np.float32))
 
         layer_idx = kit.pick_layer(drum_class, velocity)
         variants = kit.layers[drum_class][layer_idx]
@@ -267,18 +303,27 @@ def render_drum_score(drum_score, instrumental_len, sr, kit,
             cutoff = 2000.0 + 90.0 * velocity  # ~2-9 kHz across the range
             sample = _one_pole_lowpass(sample, sr, cutoff)
 
+        # Per-class transient shaping, applied to the buffer so it stays cheap
+        # and phase-safe.
+        if shaper is not None:
+            sample = shaper(sample, drum_class)
+
         contribution = (sample * gain).astype(np.float32)
         end_idx = min(idx + len(contribution), total_len)
         clip = end_idx - idx
         if clip > 0:
-            perc[idx:end_idx] += contribution[:clip]
+            target[idx:end_idx] += contribution[:clip]
             if drum_class == "hat_open":
-                active_open_hats.append((idx, contribution[:clip]))
+                active_open_hats.append((target, idx, contribution[:clip]))
 
-        placed.append({"t": t, "midi_note": CLASS_TO_MIDI.get(drum_class, 0),
-                       "velocity": velocity, "drum_class": drum_class})
+        placed.append(_tag())
 
-    return perc, placed
+    if split_layers:
+        return buffers, placed
+    total = np.zeros((total_len, 2), dtype=np.float32)
+    for buf in buffers.values():
+        total += buf
+    return total, placed
 
 
 def _next_variant(variants, drum_class, rr_state, rng):
@@ -298,9 +343,13 @@ def _next_variant(variants, drum_class, rr_state, rng):
     return idx, variants[idx]
 
 
-def _choke_open_hats(perc, active_open_hats, choke_idx, fade_len):
-    """Apply a fast fade to the tails of any ringing open hats at ``choke_idx``."""
-    for buf_start, contribution in active_open_hats:
+def _choke_open_hats(active_open_hats, choke_idx, fade_len):
+    """Apply a fast fade to the tails of any ringing open hats at ``choke_idx``.
+
+    Each entry carries the sub-bus buffer it was placed into, so a trigger in
+    one layer can choke an open hat in another.
+    """
+    for perc, buf_start, contribution in active_open_hats:
         contrib_len = len(contribution)
         buf_end = buf_start + contrib_len
         if buf_end <= choke_idx:

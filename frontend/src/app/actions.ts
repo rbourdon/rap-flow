@@ -192,6 +192,65 @@ export async function reprocessJob(
   return updatedJob.id;
 }
 
+// Re-render an existing job's mix at a new flow-versus-backbone balance.
+//
+// The balance is a *render-stage bus gain*, not part of the drum score, so
+// `fromStage: "render"` reuses the download, the stems, the syllables and the
+// drum score straight from the durable cache and only the mix is rebuilt -
+// seconds of work rather than a fresh job. The value is also persisted on the
+// job so the slider restores where the listener left it.
+export async function rerenderJob(jobId: string, layerBalance: number) {
+  const session = await auth.api.getSession({
+    headers: await headers()
+  });
+
+  if (!session?.user) {
+    throw new Error('Unauthorized');
+  }
+
+  if (!Number.isFinite(layerBalance) || layerBalance < 0 || layerBalance > 1) {
+    throw new Error('Layer balance must be between 0 and 1');
+  }
+
+  const job = await prisma.job.findUnique({
+    where: { id: jobId }
+  });
+
+  if (!job) {
+    throw new Error('Job not found');
+  }
+
+  if (job.userId !== session.user.id) {
+    throw new Error('Unauthorized');
+  }
+
+  const sourceUrl = jobSourceUrl(job);
+  if (!sourceUrl) {
+    throw new Error('Job has no source to re-render');
+  }
+
+  const updatedJob = await prisma.job.update({
+    where: { id: jobId },
+    data: {
+      status: 'PENDING',
+      stage: null,
+      error: null,
+      layerBalance,
+    }
+  });
+
+  triggerWorker({
+    jobId: updatedJob.id,
+    sourceUrl,
+    fromStage: 'render',
+    params: { layer_balance: layerBalance },
+  });
+
+  revalidatePath(`/jobs/${jobId}`);
+  revalidatePath('/');
+  return updatedJob.id;
+}
+
 // Permanently delete a job and every Vercel Blob it produced. Vercel Blob's
 // free tier is small, so removing a job must also reclaim the storage its
 // input/result/stem/event files occupy. Blob deletion is best-effort and

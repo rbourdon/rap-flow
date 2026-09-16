@@ -50,9 +50,10 @@ export async function POST(
           state: data.stageState ?? data.status,
           reused: data.reused ?? false,
           updatedAt: new Date().toISOString(),
-          // Non-fatal stage warnings (e.g. the groove stage falling back to the
-          // heuristic when GrooVAE is unavailable) are surfaced here so the UI
-          // can show them without the job being marked FAILED.
+          // Non-fatal stage warnings (e.g. the detect stage falling back to the
+          // flux detector, or the groove stage falling back to a grid template
+          // when the drum stem transcribes too sparsely) are surfaced here so
+          // the UI can show them without the job being marked FAILED.
           ...(data.warning != null ? { warning: data.warning } : {}),
         },
       };
