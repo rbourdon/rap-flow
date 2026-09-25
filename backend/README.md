@@ -61,14 +61,25 @@ whole percussion path, and one invariant sits above all the others:
 
 Two detectors run side by side on the Demucs vocal stem (`pipeline.py`):
 
+- **Voicing (`torchcrepe`).** Periodicity comes from the `tiny` model decoded
+  with **`weighted_argmax`**, not torchcrepe's default Viterbi. On separated rap
+  vocals the model's activations are flat enough that Viterbi parks every frame
+  on the top pitch bin and reads periodicity ~0. When that happened, the vocal
+  looked unvoiced, the nucleus detector found almost nothing, and the flow layer
+  was a stream of consonant hats. If fewer than 15% of the clearly audible
+  vocal frames read as voiced, detection now surfaces a non-fatal warning
+  instead of failing silently.
 - **Vowel nuclei (voiced syllables).** The ~300–3400 Hz band energy is converted
   to dB and smoothed over ~50 ms; frames below `SYL_VOICED_THRESHOLD`
-  periodicity (from `torchcrepe`) are floored so breaths and separation hiss
-  cannot form peaks. Peaks in what is left are the syllable nuclei — one per
-  syllable. Peak prominence is gated relative to the **track's own** P90−P10
-  envelope range, which is what makes the detector hold across tracks where the
-  old fixed `delta=0.05` did not, and it is measured on the *unmasked* envelope
-  so a peak next to a voicing boundary can't inherit that cliff's prominence.
+  periodicity are floored so breaths and separation hiss cannot form peaks.
+  Peaks in what is left are the syllable nuclei — one per syllable. Peak
+  prominence is gated at a fixed `SYL_PROMINENCE_DB` (3 dB). The envelope is
+  already in dB, so that is level-independent by itself. The previous gate, a
+  fraction of the whole track's P90−P10 range, grew with how much of the track
+  is silence, sat above the 3–8 dB dips between connected syllables, and
+  dropped a third or more of them. Prominence is measured on the *unmasked*
+  envelope, so a peak next to a voicing boundary can't inherit that cliff's
+  prominence.
 - **`t` is the attack, not the nucleus.** Drums have to hit where the syllable
   *starts*; using the loudness peak would place every hit late by roughly half a
   vowel. The attack is the steepest rise in the 80 ms before the peak, found on a
@@ -76,8 +87,14 @@ Two detectors run side by side on the Demucs vocal stem (`pipeline.py`):
   peak-picking robust would smear the onset ~30 ms early).
 - **Transients (unvoiced consonants).** High-band (≥ 4 kHz) flux peaks on
   unvoiced frames, sub-classified by HF decay length into `sibilant` or
-  `plosive`, and suppressed within 45 ms *before* a nucleus attack (that is the
-  syllable's own onset consonant, already represented by the nucleus).
+  `plosive`, and suppressed within `TRANSIENT_SUPPRESS_MS` (150 ms) *before* a
+  nucleus attack. That is the syllable's own onset consonant, already
+  represented by the nucleus, and a hat on it plays as an early flam. Onsets
+  like "st" run 80–200 ms, so the old 45 ms window let most of them through.
+  In fast rap a word-final consonant also sits 50–160 ms ahead of the next
+  syllable, so this is a trade-off: on the JamendoLyrics hip-hop tracks, 150 ms
+  drops ~70–75% of word-initial consonant hats and keeps ~30–50% of word-final
+  ones.
 - **Strength and stress.** `strength` is the prominence over the track's **P95**
   (not its max — one outlier peak used to compress every other strength toward
   zero); `stress` is prominence relative to a 2 s moving window, so a quiet
@@ -134,6 +151,11 @@ Events keep their original keys and add `kind` (`nucleus` | `transient`),
   row; a single-variant class gets a ±3% random varispeed instead, so no two
   consecutive hits are bit-identical. Samples play at **native pitch** — there is
   no f0-tuning or pitch-shifting anywhere in the drum path.
+- **Samples are trimmed to their onset at load.** Everything before the first
+  frame above −40 dB re peak is cut, keeping a faded 1 ms pre-roll, so a hit
+  sounds *at* its note time. The bundled Salamander samples start 0–17 ms before
+  the hit, by a different amount per layer and round-robin, so untrimmed every
+  hit landed late and cycling the variants jittered it by up to ~13 ms.
 - **Choke groups.** A `hat_closed` or `kick` event chokes any still-ringing
   `hat_open` with a fast 10 ms tail fade.
 - **Bundled kit.** `kits/default/` ships CC0 synthesized placeholder one-shots so
@@ -229,10 +251,14 @@ These are read from the environment (in Modal, set them as secrets on the
 | --- | --- | --- |
 | `SYL_DETECTOR` | `nucleus` | `nucleus` (vowel nuclei) or `flux` (the old spectral-flux detector, retained as a fallback and an escape hatch). |
 | `SYL_MIN_GAP_MS` | `70` | Minimum spacing between nuclei. |
-| `SYL_PROMINENCE` | `0.28` | Peak prominence as a fraction of the track's own P90−P10 envelope range. |
+| `SYL_PROMINENCE_DB` | `3.0` | Minimum peak prominence of a nucleus, in dB. |
 | `SYL_VOICED_THRESHOLD` | `0.35` | Periodicity above which a frame counts as voiced. |
 | `TRANSIENT_ENABLED` | `1` | Run the consonant/transient detector. |
 | `TRANSIENT_MIN_GAP_MS` | `40` | Minimum spacing between transients. |
+| `TRANSIENT_SUPPRESS_MS` | `150` | Drop a consonant this close before a nucleus attack (it is that syllable's onset). Lower keeps more word-final consonants; higher drops more flams. |
+
+`SYL_PROMINENCE` (a fraction of the track's P90−P10 range) is **gone**, replaced by
+`SYL_PROMINENCE_DB`. Remove it from the `rap-flow-secrets` secret if it is set.
 
 ### Drum score (`groove`)
 
@@ -316,10 +342,13 @@ frontend and the Modal image (see the root `CLAUDE.md`).
 `tests/` covers the alignment guarantee (float-equality between every flow note
 and its source syllable), the merge guard, backbone transcription and gap fill,
 the balance law, the limiter ceiling, bed-only ducking, the cache-key rules, and
-an end-to-end score→mix integration check on synthesised stems. The two stages
-that need the ML stack (`separate` → demucs, `detect` → torchcrepe) are covered
-by stubbing `pipeline._crepe_pitch`; a full end-to-end run is a `cli.py`
-listening pass.
+an end-to-end score→mix integration check on synthesised stems. It also covers
+the detection fixes: the torchcrepe decoder choice, the dB prominence gate on
+connected syllables, onset-consonant suppression, the no-voicing warning, and
+kit samples sounding at their note time. The two stages that need the ML stack
+(`separate` → demucs, `detect` → torchcrepe) are covered by stubbing
+`pipeline._crepe_pitch` (or faking `torchcrepe` to check the call); a full
+end-to-end run is a `cli.py` listening pass.
 
 What the tests can't cover, and what to listen for:
 
