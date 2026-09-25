@@ -84,8 +84,41 @@ def _normalize_peak(sample, target=0.98):
     return sample
 
 
+# A sample's onset is its first frame above this fraction of its peak (-40 dB).
+_ONSET_THRESHOLD = 0.01
+# Audio kept ahead of the onset after trimming, faded in so the cut can't click.
+_ONSET_PREROLL_S = 0.001
+
+
+def _trim_to_onset(sample, sr):
+    """Drop a one-shot's leading silence so it sounds *at* its note time.
+
+    Real multi-sampled kits are cut loosely: the bundled Salamander samples
+    start 0-17 ms before the hit, and by a different amount per velocity layer
+    and round-robin variant. Placed verbatim, every hit landed late and cycling
+    the variants jittered it, on the syllable-locked flow layer as much as on the
+    backbone. Trimming to a fixed 1 ms pre-roll makes the placement time the
+    attack.
+    """
+    env = np.max(np.abs(sample), axis=1) if sample.size else np.zeros(0)
+    if not env.size or float(env.max()) <= 0:
+        return sample
+    onset = int(np.argmax(env > float(env.max()) * _ONSET_THRESHOLD))
+    preroll = int(round(_ONSET_PREROLL_S * sr))
+    start = max(0, onset - preroll)
+    trimmed = sample[start:].copy()
+    fade = onset - start
+    if fade > 0:
+        trimmed[:fade] *= np.linspace(0.0, 1.0, fade, endpoint=False,
+                                      dtype=np.float32)[:, np.newaxis]
+    return trimmed
+
+
 def _load_audio(path, target_sr):
-    """Load a WAV or FLAC as stereo float32 at ``target_sr`` (peak-normalized)."""
+    """Load a WAV or FLAC as stereo float32 at ``target_sr``.
+
+    Peak-normalized, and trimmed to its onset (see :func:`_trim_to_onset`).
+    """
     data, file_sr = sf.read(path, dtype="float32")
     if data.ndim == 1:
         data = _to_stereo(data)
@@ -103,7 +136,7 @@ def _load_audio(path, target_sr):
             scipy.signal.resample_poly(data[:, ch], up, down)
             for ch in range(data.shape[1])
         ]).astype(np.float32)
-    return _normalize_peak(data)
+    return _normalize_peak(_trim_to_onset(data, target_sr))
 
 
 def _one_pole_lowpass(sample, sr, cutoff_hz):

@@ -297,9 +297,15 @@ _VOWEL_BAND_HZ = (300.0, 3400.0)
 # High band used for the consonant/transient detector.
 _TRANSIENT_BAND_HZ = 4000.0
 
-# A transient this close *before* a nucleus attack is that syllable's own onset
-# consonant; the nucleus event already represents it.
-_TRANSIENT_SUPPRESS_S = 0.045
+# A transient up to ``TRANSIENT_SUPPRESS_MS`` *before* a nucleus attack is taken
+# to be that syllable's own onset consonant, which the nucleus event already
+# represents; a hat on it sounds as an early flam ahead of the syllable. Onsets
+# like "st"/"str" run 80-200 ms, so the old 45 ms window let most of them
+# through. It is a trade-off, not a classifier: in fast rap a word-final
+# consonant also sits 50-160 ms before the next syllable. On the JamendoLyrics
+# hip-hop tracks, 150 ms drops ~70-75% of word-initial consonant hats and keeps
+# ~30-50% of word-final ones.
+_TRANSIENT_SUPPRESS_MS_DEFAULT = 150.0
 
 # Safety-net grouping applied *within* each event kind (nuclei are already
 # one-per-syllable, so the old whole-stream grouping is gone).
@@ -311,6 +317,16 @@ _ATTACK_SEARCH_S = 0.080
 # Below this many nuclei per second of voiced audio the nucleus detector is
 # considered to have failed and the flux fallback takes over.
 _MIN_NUCLEI_PER_VOICED_SECOND = 0.8
+
+# Frames per torchcrepe forward pass. Left unset, torchcrepe puts the whole
+# track in one batch, which for a 4-minute vocal is a multi-GB activation.
+_CREPE_BATCH_FRAMES = 2048
+
+# "Loud" vocal frames are those within this many dB of the vowel band's P95.
+# If fewer than _MIN_VOICED_FRACTION of them read as voiced, the pitch tracker
+# has failed (it is what a broken decoder looks like), not the vocal.
+_LOUD_FRAME_RANGE_DB = 20.0
+_MIN_VOICED_FRACTION = 0.15
 
 
 def _env_float(name, default):
@@ -332,10 +348,12 @@ def _syllable_params():
     return {
         "detector": (os.environ.get("SYL_DETECTOR") or "nucleus").strip().lower(),
         "min_gap_ms": _env_float("SYL_MIN_GAP_MS", 70.0),
-        "prominence": _env_float("SYL_PROMINENCE", 0.28),
+        "prominence_db": _env_float("SYL_PROMINENCE_DB", 3.0),
         "voiced_threshold": _env_float("SYL_VOICED_THRESHOLD", 0.35),
         "transient_enabled": _env_flag("TRANSIENT_ENABLED", True),
         "transient_min_gap_ms": _env_float("TRANSIENT_MIN_GAP_MS", 40.0),
+        "transient_suppress_ms": _env_float(
+            "TRANSIENT_SUPPRESS_MS", _TRANSIENT_SUPPRESS_MS_DEFAULT),
     }
 
 
@@ -384,7 +402,19 @@ def _band_energy(mag, freqs, lo_hz, hi_hz=None):
 
 
 def _crepe_pitch(y, sr):
-    """Run torchcrepe exactly as before; returns ``(pitch, periodicity)``."""
+    """Run torchcrepe; returns ``(pitch, periodicity)``.
+
+    The decoder has to be ``weighted_argmax``, not torchcrepe's default Viterbi.
+    On a separated rap vocal the ``tiny`` model's per-frame activations are
+    fairly flat (median peak ~0.6), and Viterbi's transition matrix, whose edge
+    rows have fewer neighbours and so larger entries, then makes it cheaper to
+    park the path on the top pitch bin: every frame decodes to ~1980 Hz and
+    ``periodicity``, read at that bin, comes out ~0. Nothing is "voiced", the
+    nucleus detector finds almost no syllables, and the transient detector
+    fires on everything, so the flow layer became a stream of hats. The network
+    itself was fine: argmax decoding of the same activations reads ~65% of the
+    frames as voiced at a plausible pitch.
+    """
     import torch
     import torchcrepe
 
@@ -397,7 +427,9 @@ def _crepe_pitch(y, sr):
         fmin=50,
         fmax=2000,
         model='tiny',
+        decoder=torchcrepe.decode.weighted_argmax,
         return_periodicity=True,
+        batch_size=_CREPE_BATCH_FRAMES,
     )
     pitch = np.atleast_1d(pitch.squeeze().numpy()).astype(float)
     periodicity = np.atleast_1d(periodicity.squeeze().numpy()).astype(float)
@@ -479,10 +511,13 @@ def _nucleus_events(mag, freqs, fps, periodicity, pitch, params,
         env_fine = _align_to_frames(attack_env_db, len(env))
         env_fine = env_fine - float(np.min(env_fine))
 
-    # Peak prominence is measured against the track's own dynamic range. A fixed
-    # constant (the old ``delta=0.05``) does not hold across tracks.
-    p10, p90 = np.percentile(env, [10, 90])
-    min_prominence = params["prominence"] * max(float(p90 - p10), 1e-6)
+    # Peak prominence is gated in dB. The envelope is already log-scaled, so a
+    # fixed dB prominence is level-independent on its own. The previous gate, a
+    # fraction of the whole track's P90-P10 envelope range, grew with how much
+    # of the track is silence or instrumental break rather than with how deep
+    # the dips between syllables are (3-8 dB across a voiced consonant in
+    # connected rap), and on real vocals it dropped a third or more of them.
+    min_prominence = params["prominence_db"]
 
     voiced = periodicity >= params["voiced_threshold"]
     # Breaths and separation hiss sit in unvoiced frames; flooring them there
@@ -579,6 +614,7 @@ def _transient_events(mag, freqs, fps, periodicity, pitch, params,
     prominences = np.asarray(props["prominences"], dtype=float)
     hop = 1.0 / fps
     decay_limit = int(round(0.150 * fps))
+    suppress_s = params["transient_suppress_ms"] / 1000.0
 
     kept, kept_prom = [], []
     for peak, prom in zip(peaks, prominences):
@@ -592,7 +628,7 @@ def _transient_events(mag, freqs, fps, periodicity, pitch, params,
         t = float(peak * hop)
         # A transient just before a nucleus attack is that syllable's own onset
         # consonant, already represented by the nucleus event.
-        if any(0.0 <= (nt - t) <= _TRANSIENT_SUPPRESS_S for nt in nucleus_times):
+        if any(0.0 <= (nt - t) <= suppress_s for nt in nucleus_times):
             continue
 
         # Sub-classify by how long the high band keeps ringing: sustained noise
@@ -690,6 +726,35 @@ def _flux_events(y, sr, pitch, periodicity):
     return events
 
 
+def _voicing_warning(mag, freqs, fps, periodicity, voiced_threshold):
+    """A warning if the pitch tracker calls a clearly audible vocal unvoiced.
+
+    Rap is mostly voiced, so when almost none of the loud vowel-band frames
+    clear ``voiced_threshold`` the tracker has failed, not the vocal. That is
+    exactly what the Viterbi-decoder bug in :func:`_crepe_pitch` looked like,
+    and it went unnoticed because the nucleus-rate check divides by the same
+    (near-zero) voiced time. Returns ``None`` when the vocal is too short or too
+    quiet to judge.
+    """
+    energy_db = 20.0 * np.log10(_band_energy(mag, freqs, *_VOWEL_BAND_HZ) + 1e-10)
+    if not len(energy_db) or not len(periodicity):
+        return None
+    ref = float(np.percentile(energy_db, 95))
+    if ref < -80.0:
+        return None  # effectively silent: nothing to judge
+    loud = energy_db >= ref - _LOUD_FRAME_RANGE_DB
+    if np.sum(loud) < fps:  # under a second of audible vocal
+        return None
+    # ``periodicity`` is already aligned to the STFT frames (same length).
+    fraction = float(np.mean(periodicity[loud] >= voiced_threshold))
+    if fraction >= _MIN_VOICED_FRACTION:
+        return None
+    return (
+        f"Pitch tracker read only {fraction:.0%} of the audible vocal as voiced; "
+        f"syllable detection is unreliable on this track."
+    )
+
+
 def detect_syllables(vocals_wav: str):
     """Detect syllable events on the vocal stem.
 
@@ -720,7 +785,12 @@ def detect_syllables(vocals_wav: str):
     pitch = _align_to_frames(pitch, n_frames)
     periodicity = _align_to_frames(periodicity, n_frames)
 
-    warning = None
+    warnings = []
+    voicing_warning = _voicing_warning(mag, freqs, fps, periodicity,
+                                       params["voiced_threshold"])
+    if voicing_warning:
+        logger.warning(voicing_warning)
+        warnings.append(voicing_warning)
     detector = params["detector"] if params["detector"] in ("nucleus", "flux") else "nucleus"
 
     events = []
@@ -731,11 +801,12 @@ def detect_syllables(vocals_wav: str):
         voiced_seconds = float(np.sum(periodicity >= params["voiced_threshold"])) / fps
         rate = (len(nuclei) / voiced_seconds) if voiced_seconds > 0 else 0.0
         if not nuclei or rate < _MIN_NUCLEI_PER_VOICED_SECOND:
-            warning = (
+            fallback_warning = (
                 f"Nucleus syllable detector produced {len(nuclei)} events "
                 f"({rate:.2f}/voiced-second); fell back to the spectral-flux detector."
             )
-            logger.warning(warning)
+            logger.warning(fallback_warning)
+            warnings.append(fallback_warning)
             detector = "flux"
         else:
             transients = []
@@ -761,6 +832,7 @@ def detect_syllables(vocals_wav: str):
     logger.info(
         "detect: %d events (%s detector)", len(events), detector
     )
+    warning = " ".join(warnings) if warnings else None
     return {"events": events, "detector": detector, "warning": warning}
 
 
