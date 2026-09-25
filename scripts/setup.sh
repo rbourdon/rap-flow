@@ -21,10 +21,21 @@ fresh() { # fresh <name> <hash>: true if the step already ran for this hash
 
 log() { printf '[setup] %s\n' "$*"; }
 
+# --- node ---------------------------------------------------------------------
+# .nvmrc pins the Node major for everything: CI, Vercel (engines in
+# frontend/package.json), cloud sessions (the SessionStart hook installs it).
+# Here we only warn: a local machine's Node is its owner's to manage.
+want="$(tr -dc '0-9' < "$ROOT/.nvmrc")"
+have="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo none)"
+if [ "$have" != "$want" ]; then
+  log "WARNING: Node $have is active but .nvmrc pins Node $want (try: nvm use)"
+fi
+
 # --- frontend -----------------------------------------------------------------
 # `npm ci` never rewrites package-lock.json, so parallel sessions don't pick
-# up spurious lockfile diffs. Its postinstall runs `prisma generate`.
-h="$(hash_of "$ROOT/frontend/package-lock.json")"
+# up spurious lockfile diffs. Its postinstall runs `prisma generate`. The
+# Node major is part of the stamp so switching majors reinstalls.
+h="$(echo "node$have" | cat - "$ROOT/frontend/package-lock.json" | sha256sum | cut -d' ' -f1)"
 if [ -d "$ROOT/frontend/node_modules" ] && fresh npm "$h"; then
   log "frontend deps up to date"
 else

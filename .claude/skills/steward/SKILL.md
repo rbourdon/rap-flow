@@ -31,9 +31,9 @@ infra flake**: it reproduces locally. For e2e failures, download the
   someone else may have checked out.
 - `frontend/package-lock.json` conflict: `git checkout origin/main --
   frontend/package-lock.json`, then re-run the PR's own `npm install <pkg>` in
-  `frontend/`. Confirm with `npm ci`. If npm 10 crashes with
-  `reading 'edgesOut'`, use `npx npm@11 install <pkg>`. Never hand-merge the
-  lockfile.
+  `frontend/`. Confirm with `npm ci`. Use Node 24 (`.nvmrc`), so npm 11 writes
+  the lockfile. Never hand-merge the lockfile. A conflict in
+  `package.json`'s `allowScripts` block: keep both sides' entries.
 - `frontend/tsconfig.json` and `frontend/AGENTS.md` are rewritten by `next
   dev`. Take either side, run `make e2e` (which runs `next dev`), and commit
   whatever it leaves.

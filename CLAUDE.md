@@ -22,8 +22,12 @@ Everything runs from the repo root and needs no cloud credentials.
 | `make db-up` / `db-down` / `db-reset` | Local Postgres in `.dev/postgres` on port 54329. |
 | `make setup` | Install deps. Every target already runs it, and it's a no-op when nothing changed. |
 
+**Node 24 everywhere.** `.nvmrc` pins the major: CI reads it, Vercel gets it
+from `engines` in `frontend/package.json`, the Modal image installs it, and
+cloud sessions have it installed by the SessionStart hook. Locally, `nvm use`.
+
 Cloud sessions get dependencies from the SessionStart hook
-(`.claude/hooks/session-start.sh` → `scripts/setup.sh`), with
+(`.claude/hooks/session-start.sh` → `scripts/setup.sh`), with Node 24 and
 `backend/.venv/bin` on `PATH`. The backend dev venv deliberately leaves out
 torch/demucs/yt-dlp. Tests stub them, and `scripts/mock_worker.py` stands in
 for the whole Modal worker (steer it with `?mock-fail=<stage>&mock-error=<PREFIX>`
@@ -40,9 +44,11 @@ them from colliding:
   links and other checkouts stay valid.
 - **Lockfile.** Change dependencies only with `npm install <pkg>` in
   `frontend/`, never by hand. On a `package-lock.json` conflict, take main's
-  copy and re-run your `npm install <pkg>`. If npm 10 crashes with
-  `Cannot read properties of null (reading 'edgesOut')` (an arborist bug hit
-  by vitest's peer set), use `npx npm@11 install ...` instead.
+  copy and re-run your `npm install <pkg>`. npm 11 (bundled with Node 24)
+  runs dependency install scripts only when `allowScripts` in
+  `frontend/package.json` approves that exact version. If a bump makes
+  `npm install` warn about install scripts, review them and run
+  `npm install-scripts approve <pkg>` (Prisma's are expected).
   `@playwright/test` is pinned exactly to match the Chromium preinstalled in
   cloud sessions.
 - **Files that tools rewrite.** `next dev` rewrites `frontend/AGENTS.md` and
