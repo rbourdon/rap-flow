@@ -42,13 +42,20 @@ database may already contain tables (e.g. created by Better Auth), so
 `db push` instead creates only the missing tables/columns and is safe to re-run on
 every deploy.
 
-The `build` script runs `db:deploy` automatically, so the schema is synced on
-deploy whenever `DATABASE_URL` is available (it is skipped with a warning when
-`DATABASE_URL` is not set). After editing `schema.prisma`, apply the changes with:
+The `build` script runs `db:deploy` (`scripts/db-deploy.mjs`) automatically, so
+the schema is synced on deploy whenever `DATABASE_URL` is available. It is
+skipped with a warning when `DATABASE_URL` is not set, **and on Vercel preview
+builds**: previews share the production database, so an unmerged PR's schema
+must not reach it. Once previews get their own Neon branch (the Neon
+integration's preview branching), set `PREVIEW_DB_PUSH=1` on the Preview
+environment to sync them too. Because production is synced with `db push`,
+schema changes must be additive (new nullable or defaulted columns/tables):
+a drop or rename is data loss and fails the deploy.
 
-```bash
-npx prisma db push
-```
+For local work, don't point at Neon at all: `make db-up` (repo root) runs a
+local Postgres and pushes the schema to it, and `src/lib/db.ts` switches to
+node-postgres for `localhost` URLs. See the root `CLAUDE.md` for `make dev`,
+`make check` and `make e2e`.
 
 ## Learn More
 

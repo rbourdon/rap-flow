@@ -7,10 +7,24 @@ on:
     paths:
       - 'backend/**'
       - '.github/workflows/deploy-modal.yml'
+  workflow_dispatch:
+
+# With many PRs merging, pushes to main can land seconds apart. Deploy them one
+# at a time, in order, and never cancel a deploy that has started.
+concurrency:
+  group: deploy-modal
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,16 +34,25 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'pip'
+          cache-dependency-path: backend/requirements-dev.txt
 
+      # `modal deploy` only has to import worker.py here; the image with the
+      # ML stack is built remotely by Modal. requirements-dev.txt covers every
+      # module-level import, so the multi-GB torch/demucs install that
+      # requirements.txt implies is not needed on the runner.
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r backend/requirements.txt
+        run: pip install modal -r requirements-dev.txt
+
+      # Never ship a backend that fails its own tests, whatever path the
+      # commit took to main.
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: python -m pytest
 
       - name: Deploy to Modal
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-        run: |
-          cd backend
-          modal deploy worker.py
+        run: modal deploy worker.py

@@ -303,9 +303,15 @@ python cli.py <src> --outdir out --from-stage render   # bus chain only, seconds
 ## Tests
 
 ```bash
-pip install pytest
-python -m pytest tests/
+make test-backend        # from the repo root; installs requirements-dev.txt first
+# or, by hand:
+pip install -r requirements-dev.txt
+python -m pytest         # parallel across cores (pytest.ini); -n 0 for serial
 ```
+
+`requirements-dev.txt` is the test/lint set without the ML stack, so it
+installs in seconds. `tests/test_contracts.py` also checks the seams with the
+frontend and the Modal image (see the root `CLAUDE.md`).
 
 `tests/` covers the alignment guarantee (float-equality between every flow note
 and its source syllable), the merge guard, backbone transcription and gap fill,
