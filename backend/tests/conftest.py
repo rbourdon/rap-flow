@@ -7,10 +7,50 @@ than importing through a package.
 
 import os
 import sys
+import tempfile
 
-import numpy as np
-import pytest
-import soundfile as sf
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
+
+def _claim_numba_cache_dir():
+    """A numba cache directory no other live process is using.
+
+    librosa JIT-compiles with numba's on-disk cache (cache=True), which by
+    default lives inside the installed librosa package. On a cold cache, the
+    pytest-xdist workers all compile the beat tracker into those same files at
+    once and segfault (it happened on every fresh CI runner). So each test
+    process claims its own slot, holding an exclusive flock on it for its
+    lifetime. Slots persist, so later runs start warm; a second pytest run in
+    the same container (another agent, say) simply claims other slots.
+    """
+    base = os.path.join(
+        tempfile.gettempdir(), "rap-flow-numba-cache", "py%d%d" % sys.version_info[:2]
+    )
+    if fcntl is not None:
+        os.makedirs(base, exist_ok=True)
+        for slot in range(256):
+            path = os.path.join(base, "slot-%d" % slot)
+            lock = open(path + ".lock", "w")
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                lock.close()
+                continue
+            return path, lock  # the open handle keeps the slot ours
+    return tempfile.mkdtemp(prefix="rap-flow-numba-"), None
+
+
+# Unconditional on purpose: xdist workers inherit the controller's
+# environment, so "only if unset" would put them all back in one directory.
+# Must run before anything imports numba.
+os.environ["NUMBA_CACHE_DIR"], _NUMBA_CACHE_LOCK = _claim_numba_cache_dir()
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+import soundfile as sf  # noqa: E402
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BACKEND_DIR not in sys.path:
