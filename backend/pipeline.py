@@ -3,7 +3,6 @@ import subprocess
 import tempfile
 import urllib.parse
 import logging
-from fractions import Fraction
 from pathlib import Path
 
 # Lightweight, always-available deps. The heavy ML stack (torch, demucs,

@@ -1,5 +1,6 @@
 node_modules/
 .next/
+.next-*/
 out/
 build/
 .env
@@ -11,19 +12,38 @@ venv/
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
 *.wav
 *.mp3
 *.flac
+*.log
 frontend/node_modules/
 backend/venv/
 dev.db
+
+# Local dev state (Postgres data dir, mock-worker assets, setup stamps).
+.dev/
+
+# CLI outputs and artifact caches (`python cli.py ... --outdir output`).
+output/
+backend/output/
+mydir/
+
+# Playwright
+frontend/test-results/
+frontend/playwright-report/
+frontend/e2e/.auth/
+
+# Agent/IDE scratch. Shared Claude Code config (.claude/settings.json, hooks,
+# skills) IS committed; only personal settings are ignored.
 frontend/.agents/
 frontend/.windsurf/
 frontend/.claude/
-frontend/node_modules/
 .agents/
 .windsurf/
-.claude/
+.claude/settings.local.json
+.claude/worktrees/
 
 # Ship the bundled default drum kit despite the global *.wav ignore above.
 !backend/kits/default/**/*.wav

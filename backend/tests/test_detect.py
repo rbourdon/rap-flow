@@ -20,7 +20,6 @@ def synth_voice(path, syllable_times, sr=SR, duration=None, sibilant_times=()):
     """A crude voice: a vowel-band buzz per syllable, plus HF noise bursts."""
     duration = duration or (max(list(syllable_times) + list(sibilant_times)) + 1.0)
     y = np.zeros(int(duration * sr))
-    t_all = np.arange(len(y)) / sr
 
     for t0 in syllable_times:
         n = int(0.18 * sr)

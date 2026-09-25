@@ -5,17 +5,24 @@
   "scripts": {
     "dev": "next dev",
     "build": "npx prisma generate && npm run db:deploy && next build",
-    "db:deploy": "node -e \"process.env.DATABASE_URL ? require('child_process').execSync('npx prisma db push', { stdio: 'inherit' }) : console.warn('Skipping prisma db push: DATABASE_URL is not set')\"",
+    "db:deploy": "node scripts/db-deploy.mjs",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
     "@prisma/adapter-neon": "^7.9.1",
+    "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "@vercel/blob": "^2.6.1",
     "better-auth": "^1.6.26",
     "next": "16.3.0",
+    "pg": "^8.23.0",
     "pg-connection-string": "^2.14.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
@@ -23,8 +30,10 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@playwright/test": "1.56.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.15.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/sqlite3": "^3.1.11",
@@ -34,6 +43,7 @@
     "eslint-config-next": "16.3.0",
     "prisma": "^7.9.1",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.0"
   }
 }

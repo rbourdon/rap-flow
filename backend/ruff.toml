@@ -1,0 +1,8 @@
+# Lint gate for CI and `make lint`. Deliberately narrow: these families catch
+# real bugs (undefined names, unused imports/variables, syntax errors) without
+# forcing style churn across the audio code. Widen it in its own PR.
+target-version = "py311"
+extend-exclude = ["kits"]
+
+[lint]
+select = ["E9", "F", "PLE", "W6"]

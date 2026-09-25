@@ -1,0 +1,16 @@
+# Everything the test suite, linter and local mock worker need, WITHOUT the
+# multi-GB ML stack (torch, demucs, torchcrepe) or the Modal/yt-dlp runtime.
+# The tests stub the two ML-backed stages, so this installs in well under a
+# minute - which is what makes it viable for CI and cloud agent sessions.
+# Production dependencies live in requirements.txt and the Modal image in
+# worker.py; keep the shared numeric packages below in step with those.
+numpy
+scipy
+librosa
+soundfile
+mido
+pyloudnorm
+
+pytest
+pytest-xdist
+ruff

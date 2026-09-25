@@ -1,5 +1,6 @@
 import { neonConfig } from '@neondatabase/serverless'
 import { PrismaNeon } from '@prisma/adapter-neon'
+import { PrismaPg } from '@prisma/adapter-pg'
 import { PrismaClient } from '@prisma/client'
 import ws from 'ws'
 
@@ -7,6 +8,20 @@ neonConfig.webSocketConstructor = ws
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
+}
+
+// The Neon adapter speaks Postgres over Neon's WebSocket proxy, which a plain
+// Postgres (the local dev/CI database, see scripts/dev-db.sh) doesn't have.
+// Those use node-postgres instead. Production always points at Neon, so it
+// never takes this branch unless DATABASE_DRIVER=pg is set explicitly.
+function usesPlainPostgres(connectionString: string): boolean {
+  if (process.env.DATABASE_DRIVER) return process.env.DATABASE_DRIVER === 'pg'
+  try {
+    const { hostname } = new URL(connectionString)
+    return ['localhost', '127.0.0.1', '[::1]'].includes(hostname)
+  } catch {
+    return false
+  }
 }
 
 // DATABASE_URL is only provided at runtime (not at build time), so the Prisma
@@ -17,6 +32,10 @@ function createPrismaClient(): PrismaClient {
   const connectionString = String(process.env.DATABASE_URL)
   if (!connectionString || connectionString === 'undefined') {
     throw new Error('DATABASE_URL environment variable is not set')
+  }
+
+  if (usesPlainPostgres(connectionString)) {
+    return new PrismaClient({ adapter: new PrismaPg({ connectionString }) })
   }
 
   // PrismaNeon is a driver adapter *factory*: it expects the raw Neon pool
