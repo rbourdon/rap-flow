@@ -58,7 +58,13 @@ DEFAULT_ARTIFACTS_ROOT = os.environ.get("RAP_FLOW_ARTIFACTS", "/artifacts")
 # layers) changed shape in the two-layer percussion rewrite; without this, a
 # re-run on an already-processed source would hand old-format artifacts to new
 # code and silently produce nonsense.
-PIPELINE_VERSION = "2"
+#
+# "3": same formats, but every cached events.json was produced with torchcrepe's
+# Viterbi decoder, which read real vocals as unvoiced (see
+# ``pipeline._crepe_pitch``): near-zero syllables and a flow layer made of hats.
+# Those artifacts are wrong, not stale, so they must not be reused. Demucs stems
+# are not keyed on this and stay cached.
+PIPELINE_VERSION = "3"
 
 # Parameter keys that influence stem separation (and therefore the stems cache).
 SEPARATE_PARAM_KEYS = ["drums_duck_db"]
@@ -72,10 +78,11 @@ SEPARATE_PARAM_DEFAULTS = {"drums_duck_db": -14.0}
 DETECT_PARAM_KEYS = [
     "syl_detector",
     "syl_min_gap_ms",
-    "syl_prominence",
+    "syl_prominence_db",
     "syl_voiced_threshold",
     "transient_enabled",
     "transient_min_gap_ms",
+    "transient_suppress_ms",
 ]
 # Parameter keys that influence the groove (drum-score) stage: the backbone and
 # flow layers. `layer_balance` deliberately does NOT live here - it is a render

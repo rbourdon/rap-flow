@@ -164,6 +164,42 @@ def test_balance_keeps_total_percussion_level_within_1db(tmp_path):
     assert max(levels) - min(levels) < 1.0
 
 
+def _onset(buf):
+    """Index of the first frame above -40 dB re the buffer's peak."""
+    env = np.max(np.abs(buf), axis=1)
+    return int(np.argmax(env > float(env.max()) * 0.01))
+
+
+def test_a_loosely_cut_sample_sounds_at_its_note_time(tmp_path):
+    """Leading silence in a kit sample used to delay every hit by that much."""
+    class_dir = tmp_path / "kit" / "snare"
+    class_dir.mkdir(parents=True)
+    lead = int(0.015 * SR)
+    tt = np.arange(4000) / SR
+    hit = np.concatenate([np.zeros(lead),
+                          np.sin(2 * np.pi * 200.0 * tt) * np.exp(-tt / 0.02)])
+    sf.write(str(class_dir / "v1_rr1.wav"), hit, SR)
+
+    kit = sampler.DrumKit.load(str(tmp_path / "kit"), SR)
+    assert _onset(kit.layers["snare"][0][0]) <= int(0.0015 * SR)
+
+    note = {"t": 0.5, "midi_note": sampler.CLASS_TO_MIDI["snare"],
+            "velocity": 100, "drum_class": "snare", "layer": "flow"}
+    perc, _ = sampler.render_drum_score([note], SR, SR, kit)
+    assert abs(_onset(perc) - int(0.5 * SR)) <= int(0.0015 * SR)
+
+
+def test_every_default_kit_sample_starts_on_its_attack():
+    """The bundled Salamander samples start 0-17 ms before the hit, varying
+    per velocity layer and round-robin; loaded, all of them start within the
+    1 ms pre-roll."""
+    kit = sampler.DrumKit.load(KIT_DIR, SR)
+    for drum_class, layers in kit.layers.items():
+        for layer in layers:
+            for sample in layer:
+                assert _onset(sample) <= int(0.0015 * SR), drum_class
+
+
 def test_flow_accent_class_missing_from_the_kit_falls_back(tmp_path):
     """``FLOW_ACCENT_CLASS`` is validated against the kit at render time."""
     notes = [{"t": 0.5, "midi_note": 37, "velocity": 90,
