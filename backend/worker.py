@@ -28,7 +28,11 @@ image = modal.Image.debian_slim(python_version="3.12") \
     ) \
     .pip_install(
         "yt-dlp", f"bgutil-ytdlp-pot-provider=={BGUTIL_VERSION}", "ffmpeg-python", "demucs", "librosa",
-        "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests", "scipy"
+        "torchcrepe", "numpy", "soundfile", "mido", "pyloudnorm", "requests", "scipy",
+        # `web_trigger` is a @modal.fastapi_endpoint. Modal used to add FastAPI to
+        # the image implicitly; it now refuses to deploy the endpoint unless the
+        # image installs it (tests/test_contracts.py checks this).
+        "fastapi[standard]",
     ) \
     .env({"KIT_DIR": "/root/kits/default"}) \
     .add_local_dir("kits", "/root/kits") \

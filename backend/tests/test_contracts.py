@@ -110,6 +110,32 @@ def test_modal_image_sources_exist():
     assert not stale, f"add_local_python_source lists missing modules: {sorted(stale)}"
 
 
+def test_modal_image_installs_fastapi_for_web_endpoints():
+    """Modal rejects a @modal.fastapi_endpoint (or asgi_app) at deploy time
+    unless the image installs FastAPI itself; it no longer adds it implicitly.
+    That failure only shows up in the deploy job on main."""
+    tree = _worker_tree()
+    web = [
+        fn.name for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+        for dec in fn.decorator_list
+        if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Attribute)
+        and dec.func.attr in ("fastapi_endpoint", "asgi_app", "web_endpoint")
+    ]
+    installed = {
+        arg.value.split("[")[0].split("=")[0].split("<")[0].split(">")[0].strip().lower()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "pip_install"
+        for arg in node.args
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+    }
+    if web:
+        assert "fastapi" in installed, (
+            f"{web} are FastAPI web endpoints but the Modal image doesn't "
+            "pip_install fastapi - add \"fastapi[standard]\" in worker.py"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Workflow stages
 # ---------------------------------------------------------------------------
