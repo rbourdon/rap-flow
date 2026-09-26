@@ -6,8 +6,14 @@ import { expect, signInAsNewUser, test } from './fixtures'
 
 async function createJob(page: Page, sourceUrl: string) {
   await page.goto('/')
-  await page.getByLabel(/url/i).fill(sourceUrl)
-  await page.getByRole('button', { name: 'Create beat' }).click()
+  const submit = page.getByRole('button', { name: 'Create beat' })
+  // A fill that lands before React hydrates is dropped from the form's state,
+  // leaving the button disabled, so fill again until the form has the URL.
+  await expect(async () => {
+    await page.getByLabel(/url/i).fill(sourceUrl)
+    await expect(submit).toBeEnabled({ timeout: 1000 })
+  }).toPass()
+  await submit.click()
   await page.waitForURL(/\/jobs\/[^/]+$/)
   return new URL(page.url()).pathname.split('/').pop()!
 }
