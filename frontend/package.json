@@ -19,39 +19,39 @@
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
-    "@prisma/adapter-neon": "^7.9.1",
-    "@prisma/adapter-pg": "^7.9.1",
-    "@prisma/client": "^7.9.1",
-    "@vercel/blob": "^2.6.1",
-    "better-auth": "^1.6.26",
-    "next": "16.3.0",
+    "@prisma/adapter-neon": "^7.10.0",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "@vercel/blob": "^2.8.0",
+    "better-auth": "^1.7.6",
+    "next": "16.3.6",
     "pg": "^8.23.0",
     "pg-connection-string": "^2.14.0",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "wavesurfer.js": "^7.12.11",
-    "ws": "^8.21.3"
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "wavesurfer.js": "^8.0.1",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^24.13.6",
+    "@types/node": "^24.19.0",
     "@types/pg": "^8.15.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/sqlite3": "^3.1.11",
     "@types/ws": "^8.18.1",
-    "dotenv": "^17.4.2",
+    "dotenv": "^18.0.4",
     "eslint": "^9",
-    "eslint-config-next": "16.3.0",
-    "prisma": "^7.9.1",
+    "eslint-config-next": "16.3.6",
+    "prisma": "^7.10.0",
     "tailwindcss": "^4",
     "typescript": "^5",
-    "vitest": "^4.1.0"
+    "vitest": "^5.0.2"
   },
   "allowScripts": {
-    "@prisma/engines@7.9.1": true,
-    "prisma@7.9.1": true,
-    "unrs-resolver@1.12.2": true
+    "unrs-resolver@1.12.2": true,
+    "prisma@7.10.0": true,
+    "@prisma/engines@7.10.0": true
   }
 }
