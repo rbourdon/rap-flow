@@ -10,27 +10,39 @@ what made it drift.
 
 The drum class comes from the syllable's own features:
 
-===========================================  ==================  ==========
-Event                                        Class               Velocity
-===========================================  ==================  ==========
-voiced, ``stress`` in the top 15% of a 2 s   ``FLOW_ACCENT_CLASS`` 70-100
-window                                       (default ``ride``)
-voiced, otherwise                            ``snare`` (ghost)   20-45
-``sibilant``                                 ``hat_closed``      35-70
-``plosive``                                  ``hat_closed``      45-75
-longest sibilant at a phrase end             ``hat_open``        50-80
-phrase start (> 0.6 s gap) with high stress  ``crash`` (extra)   80-110
-===========================================  ==================  ==========
+===========================================  =======================  ==========
+Event                                        Class                    Velocity
+===========================================  =======================  ==========
+voiced, ``stress`` in the top 15% of a 2 s   ``FLOW_ACCENT_CLASS``    65-90
+window                                       (default ``hat_closed``)
+voiced, otherwise                            ``FLOW_SYLLABLE_CLASS``  25-50
+                                             (default ``hat_closed``)
+``sibilant``                                 ``hat_closed``           20-40
+``plosive``                                  ``hat_closed``           25-45
+longest sibilant at a phrase end             ``hat_open``             40-65
+phrase start (> 0.6 s gap) with high stress  ``crash`` (extra)        80-110
+===========================================  =======================  ==========
 
-A side stick is the idiomatic accent sound, but ``kits/default`` ships no rim
-samples, so the default accent class is ``ride``; :mod:`pipeline` validates it
-against the loaded kit at render time and falls back to ``hat_closed``.
+Every syllable is a closed hat by default: a light, bright layer above the
+backbone and the instrumental's body. The previous defaults (a ``snare`` ghost
+on every syllable, a ``ride`` on accents) were never heard in production
+until syllable detection was fixed, because the pitch tracker read the whole
+vocal as unvoiced and the flow layer came out as consonant hats. Once they were
+heard, they were worse: the kit's layers are all peak-normalized, so a "ghost"
+is within ~2-3 dB of a backbeat snare, and ~2.5 of them a second, plus a ride
+on every accent, put 76% of the flow layer's energy in 150 Hz-1 kHz, the band
+of the backbone snare and the instrumental's body. ``FLOW_SYLLABLE_CLASS=snare``
+and ``FLOW_ACCENT_CLASS=ride`` bring that back for comparison.
 
-Ghosts are quiet ``snare`` hits, which is exactly what a ghost note is - and
-the default kit's snare has four velocity layers, so ``sampler.pick_layer``
-selects a genuinely soft sample rather than a turned-down loud one. Sharing the
-``snare`` class with the backbone is why the merge guard in :mod:`groove` and
-the bed-only ducking in :mod:`pipeline` both exist.
+Velocities scale with ``strength`` (prominence against the whole track), not
+``stress`` (against the loudest syllable within ±1 s): an accent is by
+definition near the top of its window, so ``stress`` put every accent at ~100.
+Consonant hats sit below syllable hats; they are texture, not the flow.
+
+:mod:`pipeline` validates the classes against the loaded kit at render time and
+falls back to ``hat_closed``. A flow ``snare`` shares its class with the
+backbone, which is why the merge guard in :mod:`groove` and the bed-only
+ducking in :mod:`pipeline` both exist.
 """
 
 import os
@@ -86,7 +98,10 @@ def flow_params(params: dict = None):
             return default
 
     return {
-        "accent_class": pick("flow_accent_class", "FLOW_ACCENT_CLASS", "ride", str),
+        "accent_class": pick("flow_accent_class", "FLOW_ACCENT_CLASS",
+                             "hat_closed", str),
+        "syllable_class": pick("flow_syllable_class", "FLOW_SYLLABLE_CLASS",
+                               "hat_closed", str),
         "min_gap_ms": pick("flow_min_gap_ms", "FLOW_MIN_GAP_MS", 45.0),
     }
 
@@ -185,6 +200,13 @@ def build_flow_notes(events, params: dict = None, cull: bool = True):
             accent_class, ACCENT_FALLBACK_CLASS,
         )
         accent_class = ACCENT_FALLBACK_CLASS
+    syllable_class = cfg["syllable_class"]
+    if syllable_class not in CLASS_TO_MIDI:
+        logger.warning(
+            "FLOW_SYLLABLE_CLASS %r is not a known drum class; using %r.",
+            syllable_class, ACCENT_FALLBACK_CLASS,
+        )
+        syllable_class = ACCENT_FALLBACK_CLASS
 
     indexed = [(i, e) for i, e in enumerate(events)]
     indexed.sort(key=lambda pair: float(pair[1]["t"]))
@@ -213,21 +235,20 @@ def build_flow_notes(events, params: dict = None, cull: bool = True):
         if subtype == "voiced":
             if accent_by_pos.get(pos):
                 notes.append(_note(t, accent_class,
-                                   _scaled_velocity(stress, 70, 100), orig_index))
+                                   _scaled_velocity(strength, 65, 90), orig_index))
             else:
-                notes.append(_note(t, "snare",
-                                   _scaled_velocity(strength, 20, 45), orig_index,
-                                   source="syllable"))
+                notes.append(_note(t, syllable_class,
+                                   _scaled_velocity(strength, 25, 50), orig_index))
         elif subtype == "sibilant":
             if pos in open_hat_positions:
                 notes.append(_note(t, "hat_open",
-                                   _scaled_velocity(strength, 50, 80), orig_index))
+                                   _scaled_velocity(strength, 40, 65), orig_index))
             else:
                 notes.append(_note(t, "hat_closed",
-                                   _scaled_velocity(strength, 35, 70), orig_index))
+                                   _scaled_velocity(strength, 20, 40), orig_index))
         else:  # plosive
             notes.append(_note(t, "hat_closed",
-                               _scaled_velocity(strength, 45, 75), orig_index))
+                               _scaled_velocity(strength, 25, 45), orig_index))
 
         # Phrase-start crash, *in addition to* the syllable's own hit.
         starts_phrase = prev_t is None or (t - prev_t) > _PHRASE_GAP_S

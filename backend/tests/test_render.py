@@ -181,23 +181,46 @@ def test_a_loosely_cut_sample_sounds_at_its_note_time(tmp_path):
     sf.write(str(class_dir / "v1_rr1.wav"), hit, SR)
 
     kit = sampler.DrumKit.load(str(tmp_path / "kit"), SR)
-    assert _onset(kit.layers["snare"][0][0]) <= int(0.0015 * SR)
-
     note = {"t": 0.5, "midi_note": sampler.CLASS_TO_MIDI["snare"],
             "velocity": 100, "drum_class": "snare", "layer": "flow"}
     perc, _ = sampler.render_drum_score([note], SR, SR, kit)
-    assert abs(_onset(perc) - int(0.5 * SR)) <= int(0.0015 * SR)
+    assert abs(_onset(perc) - int(0.5 * SR)) <= int(0.001 * SR)
 
 
-def test_every_default_kit_sample_starts_on_its_attack():
-    """The bundled Salamander samples start 0-17 ms before the hit, varying
-    per velocity layer and round-robin; loaded, all of them start within the
-    1 ms pre-roll."""
+def test_every_default_kit_class_attacks_on_its_note_time():
+    """The bundled Salamander samples start 0-17 ms before the hit, varying per
+    velocity layer and round-robin; rendered, every class attacks on the note."""
     kit = sampler.DrumKit.load(KIT_DIR, SR)
-    for drum_class, layers in kit.layers.items():
-        for layer in layers:
-            for sample in layer:
-                assert _onset(sample) <= int(0.0015 * SR), drum_class
+    for drum_class in kit.layers:
+        for velocity in (30, 110):  # soft and loud layers
+            note = {"t": 0.5, "midi_note": sampler.CLASS_TO_MIDI[drum_class],
+                    "velocity": velocity, "drum_class": drum_class}
+            perc, _ = sampler.render_drum_score([note], SR, SR, kit)
+            assert abs(_onset(perc) - int(0.5 * SR)) <= int(0.001 * SR), \
+                (drum_class, velocity)
+
+
+def test_the_timing_fix_does_not_change_how_a_hit_sounds():
+    """Only *when* a hit sounds moved, not its tone. The transient shaper in
+    ``bus`` was tuned by ear on the untrimmed samples, so it must still see
+    them: the rendered hit is the old shaped one-shot, started earlier by its
+    lead-in."""
+    import bus
+
+    kit = sampler.DrumKit.load(KIT_DIR, SR)
+    sample = kit.layers["hat_closed"][0][0]  # v1_rr1: ~16 ms of lead-in
+    lead = sampler._onset_lead(sample)
+    assert lead > int(0.010 * SR)
+
+    note = {"t": 0.5, "midi_note": sampler.CLASS_TO_MIDI["hat_closed"],
+            "velocity": 40, "drum_class": "hat_closed"}  # soft layer: v1
+    perc, _ = sampler.render_drum_score(
+        [note], SR, SR, kit, shaper=lambda s, c: bus.shape_sample(s, SR, c))
+
+    expected = bus.shape_sample(sample, SR, "hat_closed") * sampler._velocity_gain(40)
+    start = int(0.5 * SR) - lead
+    got = perc[start:start + len(expected)]
+    assert np.allclose(got, expected[:len(got)], atol=1e-6)
 
 
 def test_flow_accent_class_missing_from_the_kit_falls_back(tmp_path):

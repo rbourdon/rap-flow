@@ -79,7 +79,10 @@ Two detectors run side by side on the Demucs vocal stem (`pipeline.py`):
   is silence, sat above the 3–8 dB dips between connected syllables, and
   dropped a third or more of them. Prominence is measured on the *unmasked*
   envelope, so a peak next to a voicing boundary can't inherit that cliff's
-  prominence.
+  prominence. Because prominence is relative, a nucleus also has to be within
+  `SYL_LEVEL_FLOOR_DB` (30 dB) of the envelope's P95. Without that floor,
+  instrument bleed in a "silent" intro or outro of the stem (read as voiced by
+  the pitch tracker) produced syllables where nobody was rapping.
 - **`t` is the attack, not the nucleus.** Drums have to hit where the syllable
   *starts*; using the loudness peak would place every hit late by roughly half a
   vowel. The attack is the steepest rise in the 80 ms before the peak, found on a
@@ -111,13 +114,24 @@ Events keep their original keys and add `kind` (`nucleus` | `transient`),
 
 - **Flow layer** (`flow.py`) — one event, one hit, at the event's `t` verbatim.
   No quantization, no grid snapping, no per-bar caps: the syllables already
-  encode the density. A stressed syllable (top 15% of a 2 s window) gets
-  `FLOW_ACCENT_CLASS` (default `ride`); any other voiced syllable gets a quiet
-  `snare` *ghost*; sibilants and plosives get closed hats, the sibilant closing a
-  phrase gets an open hat, and a phrase start with high stress adds a `crash`
-  alongside its own hit. The only culling is a per-class `FLOW_MIN_GAP_MS` gap,
-  keeping the louder hit, so samples can't stack on themselves. Every note
-  carries `event_index`, a back-reference into the detect stage's array.
+  encode the density. Every voiced syllable is a closed hat
+  (`FLOW_SYLLABLE_CLASS`, velocity 25–50), and a stressed one (top 15% of a 2 s
+  window) a louder one (`FLOW_ACCENT_CLASS`, 65–90). Velocities follow the
+  syllable's track-level `strength`, not its local `stress`, which put every
+  accent at ~100. Sibilants and plosives get quieter closed hats, the sibilant
+  closing a phrase gets an open hat, and a phrase start with high stress adds a
+  `crash` alongside its own hit. The only culling is a per-class
+  `FLOW_MIN_GAP_MS` gap, keeping the louder hit, so samples can't stack on
+  themselves. Every note carries `event_index`, a back-reference into the detect
+  stage's array.
+  - The earlier defaults put a `snare` ghost on every syllable and a `ride` on
+    accents. Production never played them until syllable detection was fixed
+    (#66), and then they sounded worse than the accidental all-hats layer they
+    replaced. The kit's velocity layers are all peak-normalized, so a "ghost" is
+    within ~2–3 dB of a backbeat snare. About 2.5 of them a second plus a ride on
+    every accent put 76% of the flow layer's energy in 150 Hz–1 kHz, the band of
+    the backbone snare and the instrumental's body. `FLOW_SYLLABLE_CLASS=snare`
+    and `FLOW_ACCENT_CLASS=ride` restore that mapping for comparison.
 - **Groove bed** (`backbone.py`) — the kick and snare are **transcribed from the
   song's own `drums.wav`**, a stem `separate_audio` has always written and
   `workflow.py` has always cached but nothing consumed. Band envelopes (low
@@ -151,11 +165,15 @@ Events keep their original keys and add `kind` (`nucleus` | `transient`),
   row; a single-variant class gets a ±3% random varispeed instead, so no two
   consecutive hits are bit-identical. Samples play at **native pitch** — there is
   no f0-tuning or pitch-shifting anywhere in the drum path.
-- **Samples are trimmed to their onset at load.** Everything before the first
-  frame above −40 dB re peak is cut, keeping a faded 1 ms pre-roll, so a hit
-  sounds *at* its note time. The bundled Salamander samples start 0–17 ms before
-  the hit, by a different amount per layer and round-robin, so untrimmed every
-  hit landed late and cycling the variants jittered it by up to ~13 ms.
+- **Each one-shot starts early by its own lead-in.** The bundled Salamander
+  samples start 0–17 ms before the hit, by a different amount per layer and
+  round-robin. Placed from their first frame, every hit landed late and cycling
+  the variants jittered it by up to ~13 ms. The sampler measures the lead-in
+  (the first frame above −40 dB re peak) and starts the sample that much early,
+  so the attack lands on the note time. The samples are deliberately *not*
+  trimmed: the per-class transient shaping in `bus.py` was tuned by ear on the
+  untrimmed samples, and trimming them (the first version of this fix) moved
+  its attack boost and hat decay onto the real attack, up to +5 dB on closed hats.
 - **Choke groups.** A `hat_closed` or `kick` event chokes any still-ringing
   `hat_open` with a fast 10 ms tail fade.
 - **Bundled kit.** `kits/default/` ships CC0 synthesized placeholder one-shots so
@@ -252,6 +270,7 @@ These are read from the environment (in Modal, set them as secrets on the
 | `SYL_DETECTOR` | `nucleus` | `nucleus` (vowel nuclei) or `flux` (the old spectral-flux detector, retained as a fallback and an escape hatch). |
 | `SYL_MIN_GAP_MS` | `70` | Minimum spacing between nuclei. |
 | `SYL_PROMINENCE_DB` | `3.0` | Minimum peak prominence of a nucleus, in dB. |
+| `SYL_LEVEL_FLOOR_DB` | `30` | A nucleus must be within this many dB of the vowel-band envelope's P95, so bleed in a silent stretch of the stem can't become a syllable. |
 | `SYL_VOICED_THRESHOLD` | `0.35` | Periodicity above which a frame counts as voiced. |
 | `TRANSIENT_ENABLED` | `1` | Run the consonant/transient detector. |
 | `TRANSIENT_MIN_GAP_MS` | `40` | Minimum spacing between transients. |
@@ -268,7 +287,8 @@ These are read from the environment (in Modal, set them as secrets on the
 | `BACKBONE_SNAP_MS` | `25` | Soft-snap window for backbone hits. Keep it tight: the sampled kick plays over the record's own, so a wide snap makes them flam. |
 | `BACKBONE_FILL` | `1` | Insert a missing backbeat snare / beat-1 kick. |
 | `BACKBONE_HATS` | `0` | Let the backbone also play hats (the flow layer owns them by default). |
-| `FLOW_ACCENT_CLASS` | `ride` | Drum class for stressed syllables. A side stick is the idiomatic sound, but `kits/default` ships no rim samples; falls back to `hat_closed` if absent from the kit. |
+| `FLOW_SYLLABLE_CLASS` | `hat_closed` | Drum class for ordinary syllables (`snare` restores the old ghost-note mapping). Falls back to `hat_closed` if absent from the kit. |
+| `FLOW_ACCENT_CLASS` | `hat_closed` | Drum class for stressed syllables (`ride` restores the old mapping). Falls back to `hat_closed` if absent from the kit. |
 | `FLOW_MIN_GAP_MS` | `45` | Per-class minimum gap in the flow layer (the only culling it does). |
 | `MERGE_SNARE_GUARD_MS` | `60` | Flow ghosts suppressed this close to a bed snare. |
 

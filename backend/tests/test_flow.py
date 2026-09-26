@@ -98,3 +98,37 @@ def test_merge_drops_flow_ghosts_near_a_bed_snare():
     assert any(n["layer"] == "bed" for n in merged)
     # Sorted by time.
     assert [n["t"] for n in merged] == sorted(n["t"] for n in merged)
+
+
+def test_syllables_are_closed_hats_by_default(events):
+    """Snare ghosts on every syllable plus a ride on accents put the flow layer
+    in the backbone snare's band at nearly its level; the default is hats."""
+    notes = flow.build_flow_notes(events, cull=False)
+    voiced = [n for n in notes if n["source"] == "syllable"
+              and events[n["event_index"]]["subtype"] == "voiced"]
+    assert voiced
+    assert {n["drum_class"] for n in voiced} == {"hat_closed"}
+
+
+def test_the_ghost_snare_mapping_is_one_setting_away(events, monkeypatch):
+    monkeypatch.setenv("FLOW_SYLLABLE_CLASS", "snare")
+    monkeypatch.setenv("FLOW_ACCENT_CLASS", "ride")
+    notes = flow.build_flow_notes(events, cull=False)
+    classes = {n["drum_class"] for n in notes if n["source"] == "syllable"
+               and events[n["event_index"]]["subtype"] == "voiced"}
+    assert classes <= {"snare", "ride"} and "snare" in classes
+
+
+def test_accent_velocity_follows_strength_not_local_stress():
+    """``stress`` is relative to the loudest syllable within ±1 s, so every
+    accent had stress ~1 and played at ~100. Two accents with the same stress
+    but different track-level strength must not play at the same velocity."""
+    evs = [
+        {"t": 0.5, "strength": 0.2, "stress": 1.0, "dur": 0.1,
+         "kind": "nucleus", "subtype": "voiced"},
+        {"t": 5.0, "strength": 1.0, "stress": 1.0, "dur": 0.1,
+         "kind": "nucleus", "subtype": "voiced"},
+    ]
+    notes = [n for n in flow.build_flow_notes(evs, cull=False)
+             if n["source"] == "syllable"]
+    assert len({n["velocity"] for n in notes}) == 2

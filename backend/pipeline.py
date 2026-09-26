@@ -349,6 +349,7 @@ def _syllable_params():
         "detector": (os.environ.get("SYL_DETECTOR") or "nucleus").strip().lower(),
         "min_gap_ms": _env_float("SYL_MIN_GAP_MS", 70.0),
         "prominence_db": _env_float("SYL_PROMINENCE_DB", 3.0),
+        "level_floor_db": _env_float("SYL_LEVEL_FLOOR_DB", 30.0),
         "voiced_threshold": _env_float("SYL_VOICED_THRESHOLD", 0.35),
         "transient_enabled": _env_flag("TRANSIENT_ENABLED", True),
         "transient_min_gap_ms": _env_float("TRANSIENT_MIN_GAP_MS", 40.0),
@@ -536,6 +537,13 @@ def _nucleus_events(mag, freqs, fps, periodicity, pitch, params,
     prominences = scipy.signal.peak_prominences(env, candidates)[0]
     keep = prominences >= min_prominence
     keep &= periodicity[candidates] >= params["voiced_threshold"]
+    # Prominence is relative, so on its own it passes a 3 dB ripple at any level,
+    # and weighted_argmax periodicity reads tonal bleed in a "silent" stretch of
+    # the stem (an intro, an outro, a beat break) as voiced often enough to let
+    # it through. A syllable has to be within SYL_LEVEL_FLOOR_DB of the vocal's
+    # loud level (the P95 of this same envelope).
+    loud_ref = float(np.percentile(env, 95))
+    keep &= env[candidates] >= loud_ref - params["level_floor_db"]
     peaks = candidates[keep]
     prominences = np.asarray(prominences[keep], dtype=float)
     if not len(peaks):
@@ -877,6 +885,9 @@ _MIDI_MAX_BPM = 320.0
 _KICK_NOTCH_DB = -3.0
 _KICK_NOTCH_Q = 1.4
 _KICK_NOTCH_FALLBACK_HZ = 65.0
+
+# Most normalize-then-limit passes sample_render makes to reach -14 LUFS.
+_LOUDNESS_PASSES = 8
 
 
 def _build_midi_tempo_map(beat_times, ticks_per_beat, fallback_tempo_us):
@@ -1220,10 +1231,12 @@ def sample_render(drum_score: dict, instrumental_wav: str, output_mix_wav: str,
     # Normalize, then limit again as the safety clamp — and repeat, because the
     # second limiter pass is program-dependent and can itself pull the loudness
     # back down (heavily transient material cannot reach -14 LUFS under a
-    # -1 dBTP ceiling in one pass). Two or three iterations converge; the loop
-    # exits as soon as the measurement is on target.
+    # -1 dBTP ceiling in one pass). Dense, body-heavy percussion converges in
+    # two or three iterations; a sparse, peaky one (hats on the syllables over a
+    # clicky bed) can need five or six, so the cap is eight. The loop exits as
+    # soon as the measurement is on target.
     meter = pyln.Meter(sr)
-    for _ in range(3):
+    for _ in range(_LOUDNESS_PASSES):
         loudness = meter.integrated_loudness(mix)
         if not np.isfinite(loudness):
             break

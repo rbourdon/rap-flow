@@ -330,3 +330,33 @@ def test_a_pitch_tracker_that_hears_no_voicing_is_reported(tmp_path, monkeypatch
     assert result["detector"] == "nucleus"  # no fallback: the old blind spot
     assert result["warning"]
     assert "Pitch tracker" in result["warning"]
+
+
+def test_quiet_bleed_before_the_rap_is_not_a_syllable(tmp_path, monkeypatch):
+    """Instrument bleed in a "silent" intro of the vocal stem has 3 dB ripples
+    of its own, and weighted_argmax periodicity reads tonal bleed as voiced, so
+    prominence alone let it through: rides and crashes played over the intro
+    before anyone rapped. A syllable has to be near the vocal's loud level."""
+    t = np.arange(int(6.0 * SR)) / SR
+    y = np.zeros(len(t))
+    # 0-2.5 s: bleed ~45 dB under the rap, swelling a few dB twice a second.
+    bleed = t < 2.5
+    swell = 1.0 + 0.6 * np.clip(np.sin(2 * np.pi * 2.0 * t), 0.0, None)
+    y[bleed] = 0.006 * swell[bleed] * np.sin(2 * np.pi * 440.0 * t[bleed])
+    path = str(tmp_path / "vocals.wav")
+    sf.write(path, y, SR)
+    times = [3.0 + 0.4 * i for i in range(7)]
+    # The rap itself, added on top.
+    synth_voice(str(tmp_path / "rap.wav"), times, duration=6.0)
+    rap, _ = sf.read(str(tmp_path / "rap.wav"))
+    sf.write(path, y + rap[:len(y)], SR)
+
+    def everything_voiced(y, sr):
+        n = 1 + len(y) // int(sr * pipeline._HOP_SECONDS)
+        return np.full(n, 440.0), np.full(n, 0.8)
+
+    monkeypatch.setattr(pipeline, "_crepe_pitch", everything_voiced)
+    nuclei = [e["t"] for e in pipeline.detect_syllables(path)["events"]
+              if e["kind"] == "nucleus"]
+    assert not [n for n in nuclei if n < 2.8]
+    assert len([n for n in nuclei if n >= 2.8]) >= len(times) - 1

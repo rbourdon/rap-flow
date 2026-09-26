@@ -64,7 +64,12 @@ DEFAULT_ARTIFACTS_ROOT = os.environ.get("RAP_FLOW_ARTIFACTS", "/artifacts")
 # ``pipeline._crepe_pitch``): near-zero syllables and a flow layer made of hats.
 # Those artifacts are wrong, not stale, so they must not be reused. Demucs stems
 # are not keyed on this and stay cached.
-PIPELINE_VERSION = "3"
+#
+# "4": syllables need a minimum level (no more phantom nuclei in intros and
+# outros), the flow layer plays syllables on closed hats instead of snare
+# ghosts and rides, and one-shots are placed early by their lead-in instead of
+# being trimmed. Detect, groove and render output all change for the same inputs.
+PIPELINE_VERSION = "4"
 
 # Parameter keys that influence stem separation (and therefore the stems cache).
 SEPARATE_PARAM_KEYS = ["drums_duck_db"]
@@ -79,6 +84,7 @@ DETECT_PARAM_KEYS = [
     "syl_detector",
     "syl_min_gap_ms",
     "syl_prominence_db",
+    "syl_level_floor_db",
     "syl_voiced_threshold",
     "transient_enabled",
     "transient_min_gap_ms",
@@ -93,6 +99,7 @@ GROOVE_PARAM_KEYS = [
     "backbone_fill",
     "backbone_hats",
     "flow_accent_class",
+    "flow_syllable_class",
     "flow_min_gap_ms",
     "merge_snare_guard_ms",
 ]

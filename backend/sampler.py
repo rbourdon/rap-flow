@@ -84,41 +84,34 @@ def _normalize_peak(sample, target=0.98):
     return sample
 
 
-# A sample's onset is its first frame above this fraction of its peak (-40 dB).
+# A sample's attack is its first frame above this fraction of its peak (-40 dB).
 _ONSET_THRESHOLD = 0.01
-# Audio kept ahead of the onset after trimming, faded in so the cut can't click.
-_ONSET_PREROLL_S = 0.001
 
 
-def _trim_to_onset(sample, sr):
-    """Drop a one-shot's leading silence so it sounds *at* its note time.
+def _onset_lead(sample):
+    """Frames of lead-in before a one-shot's attack.
 
     Real multi-sampled kits are cut loosely: the bundled Salamander samples
-    start 0-17 ms before the hit, and by a different amount per velocity layer
-    and round-robin variant. Placed verbatim, every hit landed late and cycling
-    the variants jittered it, on the syllable-locked flow layer as much as on the
-    backbone. Trimming to a fixed 1 ms pre-roll makes the placement time the
-    attack.
+    start 0-17 ms before the hit, by a different amount per velocity layer and
+    round-robin variant. Placed from their first frame, every hit landed late
+    and cycling the variants jittered it. :func:`render_drum_score` places each
+    one-shot this many frames *early* instead, so the attack lands on the note.
+
+    The sample itself is left alone on purpose. Trimming it (the first version
+    of this fix) also moved the transient shaper in :mod:`bus`, whose settings
+    were tuned by ear on these untrimmed samples: its attack boost and hat decay
+    had been landing on the lead-in, and trimmed they hit the real attack, up to
+    +5 dB on the closed hats. Shifting the placement changes *when* a hit sounds,
+    not how it sounds.
     """
     env = np.max(np.abs(sample), axis=1) if sample.size else np.zeros(0)
     if not env.size or float(env.max()) <= 0:
-        return sample
-    onset = int(np.argmax(env > float(env.max()) * _ONSET_THRESHOLD))
-    preroll = int(round(_ONSET_PREROLL_S * sr))
-    start = max(0, onset - preroll)
-    trimmed = sample[start:].copy()
-    fade = onset - start
-    if fade > 0:
-        trimmed[:fade] *= np.linspace(0.0, 1.0, fade, endpoint=False,
-                                      dtype=np.float32)[:, np.newaxis]
-    return trimmed
+        return 0
+    return int(np.argmax(env > float(env.max()) * _ONSET_THRESHOLD))
 
 
 def _load_audio(path, target_sr):
-    """Load a WAV or FLAC as stereo float32 at ``target_sr``.
-
-    Peak-normalized, and trimmed to its onset (see :func:`_trim_to_onset`).
-    """
+    """Load a WAV or FLAC as stereo float32 at ``target_sr`` (peak-normalized)."""
     data, file_sr = sf.read(path, dtype="float32")
     if data.ndim == 1:
         data = _to_stereo(data)
@@ -136,7 +129,7 @@ def _load_audio(path, target_sr):
             scipy.signal.resample_poly(data[:, ch], up, down)
             for ch in range(data.shape[1])
         ]).astype(np.float32)
-    return _normalize_peak(_trim_to_onset(data, target_sr))
+    return _normalize_peak(data)
 
 
 def _one_pole_lowpass(sample, sr, cutoff_hz):
@@ -327,6 +320,9 @@ def render_drum_score(drum_score, instrumental_len, sr, kit,
         variants = kit.layers[drum_class][layer_idx]
 
         variant_idx, sample = _next_variant(variants, drum_class, rr_state, rng)
+        # Measured on the raw variant (after any varispeed), before the lowpass
+        # and shaper, so the lead-in is the sample's own.
+        lead = _onset_lead(sample)
 
         gain = _velocity_gain(velocity)
 
@@ -342,12 +338,17 @@ def render_drum_score(drum_score, instrumental_len, sr, kit,
             sample = shaper(sample, drum_class)
 
         contribution = (sample * gain).astype(np.float32)
-        end_idx = min(idx + len(contribution), total_len)
-        clip = end_idx - idx
+        # Start the one-shot early by its lead-in so the attack lands on `t`.
+        start = idx - lead
+        if start < 0:
+            contribution = contribution[-start:]
+            start = 0
+        end_idx = min(start + len(contribution), total_len)
+        clip = end_idx - start
         if clip > 0:
-            target[idx:end_idx] += contribution[:clip]
+            target[start:end_idx] += contribution[:clip]
             if drum_class == "hat_open":
-                active_open_hats.append((target, idx, contribution[:clip]))
+                active_open_hats.append((target, start, contribution[:clip]))
 
         placed.append(_tag())
 
