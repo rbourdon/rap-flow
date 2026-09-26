@@ -44,7 +44,7 @@ export function WaveSurferPlayer({ waveformUrl, percUrl, instUrl, events }: Prop
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wavesurfer = useRef<WaveSurfer | null>(null)
-  const regionsRef = useRef<RegionsPlugin | null>(null)
+  const regionsRef = useRef<ReturnType<typeof RegionsPlugin.create> | null>(null)
   const loopRegionRef = useRef<Region | null>(null)
 
   // --- Web Audio engine refs ---
