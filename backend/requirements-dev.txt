@@ -10,6 +10,8 @@ librosa
 soundfile
 mido
 pyloudnorm
+# Pronouncing dictionary for syllables.py (pure Python + data, no ML stack).
+cmudict
 
 pytest
 pytest-xdist

@@ -105,6 +105,22 @@ def test_modal_image_ships_every_module_the_worker_imports():
     )
 
 
+def test_modal_image_ships_the_onset_refiner_weights():
+    """``speech.py`` loads ``models/onset_refiner.pt`` from beside itself, which
+    in the container is ``/root/models`` (modules are added at ``/root``)."""
+    import speech
+
+    assert os.path.isfile(speech.REFINER_PATH)
+    assert os.path.dirname(speech.REFINER_PATH) == os.path.join(BACKEND_DIR, "models")
+    shipped = [
+        tuple(arg.value for arg in node.args if isinstance(arg, ast.Constant))
+        for node in ast.walk(_worker_tree())
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_local_dir"
+    ]
+    assert ("models", "/root/models") in shipped
+
+
 def test_modal_image_sources_exist():
     stale = _image_python_sources() - _local_modules()
     assert not stale, f"add_local_python_source lists missing modules: {sorted(stale)}"

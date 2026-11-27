@@ -12,8 +12,8 @@ Kit layout on disk::
     kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.[wav|flac]
 
 e.g. ``kits/default/kick/v1_rr1.wav``, ``kits/default/kick/v3_rr2.wav``. The
-nine drum classes are ``kick, snare, hat_closed, hat_open, tom_low, tom_mid,
-tom_high, crash, ride``. ``v<layer>`` is the velocity layer (``v1`` softest);
+drum classes are ``kick, snare, hat_closed, hat_open, tom_low, tom_mid,
+tom_high, crash, ride`` and ``knock`` (the flow layer's desk knock). ``v<layer>`` is the velocity layer (``v1`` softest);
 ``rr<variant>`` is a round-robin variant. The loader scans the directory, so any
 conforming folder works and real samples can be dropped in over the placeholder
 one-shots.
@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 DRUM_CLASSES = [
     "kick", "snare", "hat_closed", "hat_open",
     "tom_low", "tom_mid", "tom_high", "crash", "ride",
+    # Not a drum: a knuckle on a wooden desk, one per syllable (see flow.py).
+    "knock",
 ]
 
 CLASS_TO_MIDI = {
@@ -61,6 +63,7 @@ CLASS_TO_MIDI = {
     "tom_high": 50,
     "crash": 49,
     "ride": 51,
+    "knock": 37,  # GM "side stick", the nearest thing a drum map has
 }
 
 MIDI_TO_CLASS = {v: k for k, v in CLASS_TO_MIDI.items()}

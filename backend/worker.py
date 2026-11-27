@@ -15,6 +15,11 @@ app = modal.App("rap-flow-worker")
 # downloadable YouTube format.
 BGUTIL_VERSION = "1.3.1"
 
+# Where the model volume is mounted (it is torch hub's checkpoint directory, so
+# Demucs finds its weights there), and the Hugging Face cache inside it.
+MODEL_CACHE_DIR = "/root/.cache/torch/hub/checkpoints"
+HF_CACHE_DIR = MODEL_CACHE_DIR + "/huggingface"
+
 image = modal.Image.debian_slim(python_version="3.12") \
     .apt_install("ffmpeg", "git", "curl") \
     .run_commands(
@@ -33,11 +38,30 @@ image = modal.Image.debian_slim(python_version="3.12") \
         # the image implicitly; it now refuses to deploy the endpoint unless the
         # image installs it (tests/test_contracts.py checks this).
         "fastapi[standard]",
+        # The speech-model syllable detector (speech.py / syllables.py): a
+        # wav2vec2 phone classifier and Whisper through transformers, and two
+        # pronunciation sources for turning lyrics into phones.
+        "transformers", "cmudict", "g2p_en",
     ) \
-    .env({"KIT_DIR": "/root/kits/default"}) \
+    .run_commands(
+        # g2p_en (pronunciations for words the dictionary lacks) reads these
+        # NLTK corpora and would otherwise fetch them on every cold start.
+        "python -m nltk.downloader -d /usr/share/nltk_data "
+        "averaged_perceptron_tagger averaged_perceptron_tagger_eng cmudict",
+    ) \
+    .env({
+        "KIT_DIR": "/root/kits/default",
+        # Hugging Face weights (about 2 GB, fetched on first use) live on the
+        # model volume next to the Demucs checkpoints.
+        "HF_HOME": HF_CACHE_DIR,
+    }) \
     .add_local_dir("kits", "/root/kits") \
+    .add_local_dir("models", "/root/models") \
     .add_local_python_source(
         "pipeline", "workflow", "rhythm", "sampler",
+        # The syllable detector: `syllables` is numpy only, `speech` holds its
+        # three torch models.
+        "syllables", "speech",
         # The two-layer drum generator and the percussion bus chain. These are
         # plain numpy/scipy/librosa, so they run on this image alongside
         # everything else - there is no second image any more. The Magenta /
@@ -64,7 +88,7 @@ _ARTIFACT_MOUNT = {ARTIFACTS_ROOT: artifacts}
 # Stem separation + syllable detection also need the demucs/torch model cache.
 _MODEL_MOUNT = {
     ARTIFACTS_ROOT: artifacts,
-    "/root/.cache/torch/hub/checkpoints": volume,
+    MODEL_CACHE_DIR: volume,
 }
 
 _SECRETS = [modal.Secret.from_name("rap-flow-secrets")]
@@ -227,7 +251,7 @@ def stage_separate(job_id: str, source_url: str, params: dict, force: bool,
     return res
 
 
-@app.function(image=image, volumes=_MODEL_MOUNT, gpu="T4", timeout=600,
+@app.function(image=image, volumes=_MODEL_MOUNT, gpu="T4", timeout=900,
               retries=1, secrets=_SECRETS)
 def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
                  callback_url: str, hmac_secret: str, blob_token: str = None) -> dict:
@@ -235,6 +259,11 @@ def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
     _stage_start(job_id, "detect", callback_url, hmac_secret)
     res = workflow.stage_detect(ARTIFACTS_ROOT, source_url, params, force=force)
     artifacts.commit()
+    try:
+        # Keep the speech models this run may have downloaded.
+        volume.commit()
+    except Exception as exc:  # a cache miss next time, never a failed job
+        print(f"model volume commit failed: {exc}")
     _post_callback({
         "jobId": job_id,
         "status": "PROCESSING",
@@ -242,8 +271,8 @@ def stage_detect(job_id: str, source_url: str, params: dict, force: bool,
         "stageKey": "detect",
         "stageState": "REUSED" if res.get("reused") else "COMPLETED",
         "reused": bool(res.get("reused")),
-        # Surfaced when the vowel-nucleus detector came back empty/sparse and
-        # the old spectral-flux detector took over.
+        # Surfaced when the speech-model detector could not run, or the
+        # loudness-based one behind it came back empty/sparse.
         **({"warning": res["warning"]} if res.get("warning") else {}),
     }, callback_url, hmac_secret, timeout=5)
     # Drop the (potentially large) events list from the return value; downstream

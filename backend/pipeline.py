@@ -346,7 +346,8 @@ def _env_flag(name, default):
 def _syllable_params():
     """Resolve the syllable-detector tunables from the environment."""
     return {
-        "detector": (os.environ.get("SYL_DETECTOR") or "nucleus").strip().lower(),
+        "detector": (os.environ.get("SYL_DETECTOR") or "speech").strip().lower(),
+        "lyrics_enabled": _env_flag("SYL_LYRICS", True),
         "min_gap_ms": _env_float("SYL_MIN_GAP_MS", 70.0),
         "prominence_db": _env_float("SYL_PROMINENCE_DB", 3.0),
         "voiced_threshold": _env_float("SYL_VOICED_THRESHOLD", 0.35),
@@ -755,10 +756,75 @@ def _voicing_warning(mag, freqs, fps, periodicity, voiced_threshold):
     )
 
 
+# How much a syllable's place in its word counts toward its accent, by CMUdict
+# stress: primary, secondary, unstressed, and "not known" for a syllable that
+# was heard but has no lyric.
+_LEXICAL_WEIGHT = {1: 1.0, 2: 0.85, 0: 0.6, None: 0.8}
+# Loudness is read over this much of the vowel, starting at its onset.
+_SYLLABLE_LEVEL_WINDOW_S = 0.10
+# Syllables this far below the track's loud ones read as strength 0.
+_SYLLABLE_LEVEL_RANGE_DB = 36.0
+
+
+def _speech_events(vocals_wav, params):
+    """Syllable events from the speech models (:mod:`syllables`).
+
+    One event per syllable, at its vowel onset. ``strength`` is how loud the
+    vowel starts (relative to the track's loud syllables) and ``stress`` adds
+    what the lyric says about it: the stressed syllable of a word outranks its
+    unstressed ones, judged against the two seconds around it.
+    """
+    import speech
+    import syllables
+
+    y, sr = librosa.load(vocals_wav, sr=speech.SR, mono=True)
+    found, info = syllables.detect(
+        y, speech.phone_posteriors,
+        transcribe_window=speech.transcribe_window if params["lyrics_enabled"] else None,
+        refine_onsets=speech.refine_onsets,
+    )
+    found.sort(key=lambda s: s["t"])
+
+    levels = []
+    for s in found:
+        a = int(s["t"] * sr)
+        b = int(min(max(s["end"], s["t"] + 0.03), s["t"] + _SYLLABLE_LEVEL_WINDOW_S) * sr)
+        seg = y[a:max(b, a + 1)]
+        levels.append(10.0 * np.log10(float(np.mean(seg ** 2)) + 1e-12) if len(seg) else -120.0)
+    levels = np.asarray(levels, dtype=float)
+    if len(levels):
+        top = float(np.percentile(levels, 95))
+        strength = np.clip(1.0 - (top - levels) / _SYLLABLE_LEVEL_RANGE_DB, 0.0, 1.0)
+    else:
+        strength = levels
+    weight = np.asarray([_LEXICAL_WEIGHT.get(s.get("lexical_stress"), 0.8) for s in found])
+    stress = _relative_stress([s["t"] for s in found], strength * weight)
+
+    events = []
+    for s, level, accent in zip(found, strength, stress):
+        events.append({
+            "t": float(s["t"]),
+            "strength": float(level),
+            "f0": 0.0,
+            "periodicity": float(np.exp(min(0.0, s.get("vowel_logp", 0.0)))),
+            "dur": float(max(0.0, s["end"] - s["t"])),
+            "kind": "nucleus",
+            "subtype": "voiced",
+            "stress": float(accent),
+            "word": s.get("word"),
+            "phone": s.get("phone"),
+            "lexical_stress": s.get("lexical_stress"),
+            "source": s.get("source"),
+            "confidence": float(s.get("confidence", 0.0)),
+        })
+    return events, info
+
+
 def detect_syllables(vocals_wav: str):
     """Detect syllable events on the vocal stem.
 
-    Returns ``{"events": [...], "detector": "nucleus"|"flux", "warning": str|None}``.
+    Returns ``{"events": [...], "detector": "speech"|"nucleus"|"flux",
+    "warning": str|None}``.
 
     Each event is::
 
@@ -766,12 +832,36 @@ def detect_syllables(vocals_wav: str):
          "dur": 0.19, "kind": "nucleus"|"transient",
          "subtype": "voiced"|"sibilant"|"plosive", "stress": 0.64}
 
-    ``t`` is the syllable's **attack** and is the only timing the flow layer
-    ever uses - no stage downstream is allowed to move a flow hit off it.
+    ``t`` is the time the hit belongs on (the vowel onset from the ``speech``
+    detector, the attack from the older ones) and is the only timing the flow
+    layer ever uses - no stage downstream is allowed to move a flow hit off it.
+
+    The default ``speech`` detector (phone classifier + lyrics + onset refiner,
+    see :mod:`syllables`) emits one voiced event per syllable and additionally
+    tags each with ``word``, ``phone``, ``lexical_stress``, ``source`` and
+    ``confidence``. If it cannot run - a model fails to load, the GPU runs out
+    of memory - the loudness-based ``nucleus`` detector takes over and the
+    result carries a warning, so a job never fails for it.
     """
     import rhythm
 
     params = _syllable_params()
+
+    if params["detector"] == "speech":
+        try:
+            events, info = _speech_events(vocals_wav, params)
+            logger.info("detect: %d events (speech detector) %s", len(events), info)
+            return {"events": events, "detector": "speech", "warning": None,
+                    "info": info}
+        except Exception as exc:
+            logger.exception("Speech syllable detector failed; using the nucleus detector.")
+            speech_warning = (
+                "The speech-model syllable detector could not run "
+                f"({type(exc).__name__}); used the older loudness-based detector, "
+                "so the hits follow the flow less closely."
+            )
+    else:
+        speech_warning = None
 
     y, sr = librosa.load(vocals_wav, sr=_ANALYSIS_SR, mono=True)
     hop_length = int(sr * _HOP_SECONDS)
@@ -785,7 +875,7 @@ def detect_syllables(vocals_wav: str):
     pitch = _align_to_frames(pitch, n_frames)
     periodicity = _align_to_frames(periodicity, n_frames)
 
-    warnings = []
+    warnings = [speech_warning] if speech_warning else []
     voicing_warning = _voicing_warning(mag, freqs, fps, periodicity,
                                        params["voiced_threshold"])
     if voicing_warning:

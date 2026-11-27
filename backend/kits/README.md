@@ -13,9 +13,10 @@ kits/<kit_name>/<drum_class>/v<layer>_rr<variant>.[wav|flac]
 - `<kit_name>` — the kit folder (the bundled one is `default`). Point the
   pipeline at a different kit with the `KIT_DIR` environment variable or the
   `--kit` CLI flag.
-- `<drum_class>` — one of the nine classes the engine understands:
+- `<drum_class>` — one of the classes the engine understands:
   `kick`, `snare`, `hat_closed`, `hat_open`, `tom_low`, `tom_mid`, `tom_high`,
-  `crash`, `ride`.
+  `crash`, `ride`, and `knock` (not a drum: the knuckle-on-a-desk the flow layer
+  plays once per syllable; a kit without it falls back to `hat_closed`).
 - `v<layer>` — the **velocity layer**, `v1` being the *softest*. A class may
   have any number of layers; incoming MIDI velocity picks the nearest one and is
   then fine-scaled with gain. A class with a single layer additionally darkens
@@ -45,6 +46,9 @@ The `default/` kit ships **real one-shots from the Salamander Drumkit** by
 Alexander Holm (CC-BY 3.0), restructured into this layer/round-robin layout so
 the pipeline works out of the box. See `default/README.md` and `default/LICENSE`
 for attribution and the per-class layer map.
+
+The one exception is `default/knock/`, which is synthesized (CC0) by
+`kits/generate_knock.py`: three velocity layers, four round-robins each.
 
 `kits/generate_default_kit.py` can regenerate **synthesized placeholder**
 one-shots (CC0) as a fallback or as a starting point for your own kit:

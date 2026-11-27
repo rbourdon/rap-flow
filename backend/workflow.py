@@ -64,7 +64,12 @@ DEFAULT_ARTIFACTS_ROOT = os.environ.get("RAP_FLOW_ARTIFACTS", "/artifacts")
 # ``pipeline._crepe_pitch``): near-zero syllables and a flow layer made of hats.
 # Those artifacts are wrong, not stale, so they must not be reused. Demucs stems
 # are not keyed on this and stay cached.
-PIPELINE_VERSION = "3"
+#
+# "4": the default detector is now the speech-model one (``syllables.py``), with
+# extra per-event fields, and the flow layer plays the new ``knock`` class.
+# Cached events and scores came from the loudness-based detector and must be
+# recomputed for a re-run to sound any different.
+PIPELINE_VERSION = "4"
 
 # Parameter keys that influence stem separation (and therefore the stems cache).
 SEPARATE_PARAM_KEYS = ["drums_duck_db"]
@@ -92,6 +97,7 @@ GROOVE_PARAM_KEYS = [
     "backbone_snap_ms",
     "backbone_fill",
     "backbone_hats",
+    "flow_style",
     "flow_accent_class",
     "flow_min_gap_ms",
     "merge_snare_guard_ms",
@@ -385,11 +391,11 @@ def stage_detect(root: str, source_url: str, params: dict = None,
                  force: bool = False) -> dict:
     """Detect syllables from the vocals stem -> events.json (cache-aware).
 
-    ``pipeline.detect_syllables`` runs the vowel-nucleus detector (one event per
-    syllable) plus the consonant/transient detector, falling back to the old
-    spectral-flux detector and surfacing a non-fatal warning if the nucleus
-    detector comes back empty or implausibly sparse. ``events.json`` itself
-    stays a plain array so the frontend's marker overlay is unaffected.
+    ``pipeline.detect_syllables`` runs the speech-model detector (one event per
+    syllable, at its vowel onset). If that cannot run it falls back to the
+    loudness-based nucleus detector, and from there to the old spectral-flux
+    one, surfacing a non-fatal warning each time. ``events.json`` itself stays
+    a plain array so the frontend's marker overlay is unaffected.
     """
     params = params or {}
     input_wav = source_input_path(root, source_url)
