@@ -4,6 +4,12 @@
 :func:`pipeline._crepe_pitch` is stubbed with a periodicity track derived from
 the synthesised signal itself. That is the only thing stubbed — the envelope,
 peak-picking, attack-finding and transient logic under test are the real code.
+
+Most of this file is about the loudness-based ``nucleus`` detector, which is
+now the fallback, so it is selected explicitly below. The default ``speech``
+detector's own logic is tested in ``test_syllables.py``; the tests at the end
+of this file cover how :func:`pipeline.detect_syllables` wraps it and what
+happens when it cannot run.
 """
 
 import numpy as np
@@ -46,6 +52,11 @@ def synth_voice(path, syllable_times, sr=SR, duration=None, sibilant_times=()):
     peak = float(np.max(np.abs(y))) or 1.0
     sf.write(path, y / peak * 0.9, sr)
     return path, duration
+
+
+@pytest.fixture(autouse=True)
+def nucleus_detector(monkeypatch):
+    monkeypatch.setenv("SYL_DETECTOR", "nucleus")
 
 
 @pytest.fixture
@@ -330,3 +341,79 @@ def test_a_pitch_tracker_that_hears_no_voicing_is_reported(tmp_path, monkeypatch
     assert result["detector"] == "nucleus"  # no fallback: the old blind spot
     assert result["warning"]
     assert "Pitch tracker" in result["warning"]
+
+
+# ---------------------------------------------------------------------------
+# The speech detector, as detect_syllables wraps it
+# ---------------------------------------------------------------------------
+
+def _stub_speech(monkeypatch, sung, text):
+    """Stand in for the three models.
+
+    ``sung`` is ``[(vowel_onset_s, consonant, vowel)]``: the phone classifier
+    "hears" that consonant for 40 ms and then the vowel for 120 ms.
+    """
+    import speech
+    import syllables
+
+    def phone_posteriors(y16k):
+        n = int(round(len(y16k) / 160))
+        row = np.full((n, len(syllables.PHONES)), 0.1 / (len(syllables.PHONES) - 1))
+        ids = np.full(n, syllables.SIL)
+        for t0, consonant, vowel in sung:
+            a = int(round(t0 / 0.010))
+            ids[a - 4:a] = syllables.PHONE_ID[consonant]
+            ids[a:a + 12] = syllables.PHONE_ID[vowel]
+        row[np.arange(n), ids] = 0.9
+        return np.log(row)
+
+    def transcribe_window(y16k, t0=0.0, language=None):
+        return [{"w": w, "start": t0, "end": t0 + len(y16k) / 16000, "lang": "en"}
+                for w in text.split()]
+
+    monkeypatch.setattr(speech, "phone_posteriors", phone_posteriors)
+    monkeypatch.setattr(speech, "transcribe_window", transcribe_window)
+    monkeypatch.setattr(speech, "refine_onsets",
+                        lambda y, coarse: (np.asarray(coarse) + 0.002, np.full(len(coarse), 0.9)))
+
+
+def test_speech_detector_is_the_default_and_emits_one_event_per_syllable(tmp_path, monkeypatch):
+    monkeypatch.delenv("SYL_DETECTOR")
+    times = [0.5, 0.9, 1.3, 1.46]
+    path, _ = synth_voice(str(tmp_path / "vocals.wav"), times)
+    sung = [(0.5, "T", "AA"), (0.9, "HH", "AA"), (1.3, "T", "AA"), (1.46, "K", "OW")]
+    _stub_speech(monkeypatch, sung, "top hot taco")
+
+    result = pipeline.detect_syllables(path)
+    assert result["detector"] == "speech"
+    assert result["warning"] is None
+    events = result["events"]
+    assert [e["t"] for e in events] == pytest.approx([t + 0.002 for t in times])
+    assert [e["word"] for e in events] == ["top", "hot", "taco", "taco"]
+    for event in events:
+        # The flow layer and the frontend's marker overlay read these.
+        assert event["kind"] == "nucleus" and event["subtype"] == "voiced"
+        assert 0.0 <= event["strength"] <= 1.0 and 0.0 <= event["stress"] <= 1.0
+        assert event["source"] == "lyrics" and event["confidence"] == 0.9
+    # Equally loud, so the lyric decides: "TA-co".
+    assert events[2]["lexical_stress"] == 1 and events[3]["lexical_stress"] == 0
+    assert events[2]["stress"] > events[3]["stress"]
+
+
+def test_a_broken_speech_detector_falls_back_and_says_so(tmp_path, monkeypatch, stub_crepe):
+    """A model that will not load must cost accuracy, never the job."""
+    import speech
+
+    monkeypatch.delenv("SYL_DETECTOR")
+
+    def no_gpu(y16k):
+        raise RuntimeError("CUDA out of memory")
+
+    monkeypatch.setattr(speech, "phone_posteriors", no_gpu)
+    times = [0.5, 0.9, 1.3, 1.7, 2.1, 2.5]
+    path, _ = synth_voice(str(tmp_path / "vocals.wav"), times)
+
+    result = pipeline.detect_syllables(path)
+    assert result["detector"] == "nucleus"
+    assert "RuntimeError" in result["warning"]
+    assert len([e for e in result["events"] if e["kind"] == "nucleus"]) == len(times)

@@ -8,7 +8,15 @@ already encode the density; capping them is what made the old heuristic path
 throw the flow away, and re-sampling them through a VAE (the GrooVAE path) is
 what made it drift.
 
-The drum class comes from the syllable's own features:
+There are two ways to voice the syllables, chosen by ``flow_style``.
+
+``knock`` (the default) is somebody tapping the flow on a wooden desk: every
+syllable is one ``knock``, and only how hard it lands changes (velocity 46-112
+from the syllable's ``stress``). No cymbals, no phrase markers, and consonant
+events, which only the older detectors emit, are not played: one syllable, one
+knock.
+
+``kit`` spreads the syllables over the drum kit, by the syllable's own features:
 
 ===========================================  ==================  ==========
 Event                                        Class               Velocity
@@ -42,6 +50,13 @@ from sampler import CLASS_TO_MIDI
 
 logger = logging.getLogger(__name__)
 
+
+FLOW_STYLES = ("knock", "kit")
+KNOCK_CLASS = "knock"
+# A hand tapping along is fairly even, with the stressed syllables landing
+# harder; this range also spans the kit's three knock layers (soft, medium,
+# hard), so an accent is a brighter knock and not just a louder one.
+_KNOCK_VELOCITY = (46, 112)
 
 # Accent class when the configured one is missing from the kit.
 ACCENT_FALLBACK_CLASS = "hat_closed"
@@ -85,7 +100,9 @@ def flow_params(params: dict = None):
         except (TypeError, ValueError):
             return default
 
+    style = str(pick("flow_style", "FLOW_STYLE", "knock", str)).strip().lower()
     return {
+        "style": style if style in FLOW_STYLES else "knock",
         "accent_class": pick("flow_accent_class", "FLOW_ACCENT_CLASS", "ride", str),
         "min_gap_ms": pick("flow_min_gap_ms", "FLOW_MIN_GAP_MS", 45.0),
     }
@@ -173,11 +190,24 @@ def build_flow_notes(events, params: dict = None, cull: bool = True):
     emitted notes carry ``event_index`` back-references into it, which is what
     makes the alignment guarantee testable and the score debuggable.
 
-    Every event that survives detection produces exactly one note whose ``t``
-    is bit-identical to the event's ``t``. ``cull=False`` skips the per-class
+    Every event that is played produces exactly one note whose ``t`` is
+    bit-identical to the event's ``t`` (the ``knock`` style plays syllables
+    only; ``kit`` plays consonant events too). ``cull=False`` skips the per-class
     minimum-gap pass, which is the only culling this layer does.
     """
     cfg = flow_params(params)
+    if cfg["style"] == "knock":
+        notes = [
+            # `t` is copied, never computed. This is the guarantee.
+            _note(float(e["t"]), KNOCK_CLASS,
+                  _scaled_velocity(float(e.get("stress", e.get("strength", 0.5))),
+                                   *_KNOCK_VELOCITY), i)
+            for i, e in enumerate(events)
+            if e.get("subtype", "voiced") == "voiced"
+        ]
+        notes.sort(key=lambda n: n["t"])
+        return apply_min_gap(notes, cfg["min_gap_ms"] / 1000.0) if cull else notes
+
     accent_class = cfg["accent_class"]
     if accent_class not in CLASS_TO_MIDI:
         logger.warning(

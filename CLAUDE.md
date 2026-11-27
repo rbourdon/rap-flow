@@ -29,7 +29,7 @@ cloud sessions have it installed by the SessionStart hook. Locally, `nvm use`.
 Cloud sessions get dependencies from the SessionStart hook
 (`.claude/hooks/session-start.sh` → `scripts/setup.sh`), with Node 24 and
 `backend/.venv/bin` on `PATH`. The backend dev venv deliberately leaves out
-torch/demucs/yt-dlp. Tests stub them, and `scripts/mock_worker.py` stands in
+torch/transformers/demucs/yt-dlp. Tests stub them, and `scripts/mock_worker.py` stands in
 for the whole Modal worker (steer it with `?mock-fail=<stage>&mock-error=<PREFIX>`
 on the source URL). Seeing a UI change in a browser: `.claude/skills/run-app`.
 
@@ -74,6 +74,8 @@ change on the other side **in the same PR**:
 - Every local module `worker.py` imports (transitively) must be listed in the
   Modal image's `add_local_python_source(...)`. Otherwise it passes locally
   and in CI, then fails inside Modal after deploy.
+- `backend/models/` (the onset-refiner weights `speech.py` loads from beside
+  itself) must reach the image through `add_local_dir("models", "/root/models")`.
 - The callback HMAC is `hex(HMAC-SHA256(secret, json.dumps(payload)))` over the
   raw body. `route.test.ts` pins a Python-generated golden vector.
 

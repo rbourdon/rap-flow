@@ -50,6 +50,8 @@ TRANSIENT_SHAPES = {
     "tom_low":    {"attack_ms": 8.0, "attack_gain": 1.25, "decay_ms": None},
     "tom_mid":    {"attack_ms": 8.0, "attack_gain": 1.25, "decay_ms": None},
     "tom_high":   {"attack_ms": 8.0, "attack_gain": 1.25, "decay_ms": None},
+    # Already all attack; any more and a run of fast syllables turns to clicks.
+    "knock":      {"attack_ms": 4.0, "attack_gain": 1.10, "decay_ms": None},
 }
 
 _DEFAULT_SHAPE = {"attack_ms": 8.0, "attack_gain": 1.25, "decay_ms": None}

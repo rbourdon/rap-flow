@@ -5,25 +5,46 @@ aligned to the voice *by construction* - there is no tolerance to tune and no
 model to blame.
 """
 
+import pytest
+
 import flow
 import groove
 
 
-def test_every_note_lands_on_its_syllable(events):
+KIT = {"flow_style": "kit"}
+
+
+@pytest.mark.parametrize("params", [None, KIT], ids=["knock", "kit"])
+def test_every_note_lands_on_its_syllable(events, params):
     """Float **equality**, not approximate: no hit may be moved at all."""
-    notes = flow.build_flow_notes(events, cull=False)
-    syllable_notes = [n for n in notes if n["source"] == "syllable"]
-
-    # One syllable, one hit - before the min-gap cull.
-    assert len(syllable_notes) == len(events)
-
+    notes = flow.build_flow_notes(events, params, cull=False)
+    assert notes
     for note in notes:
         source_event = events[note["event_index"]]
         assert note["t"] == source_event["t"]
 
 
-def test_event_index_back_references_the_detect_array(events):
+def test_knock_is_one_knock_per_syllable_and_nothing_else(events):
+    """The default style: somebody tapping the flow on a desk."""
     notes = flow.build_flow_notes(events, cull=False)
+    voiced = [i for i, e in enumerate(events) if e["subtype"] == "voiced"]
+    assert sorted(n["event_index"] for n in notes) == voiced
+    assert {n["drum_class"] for n in notes} == {"knock"}
+    assert all(n["layer"] == "flow" for n in notes)
+    # Harder on the stressed syllables, and never a different sound.
+    by_event = {n["event_index"]: n["velocity"] for n in notes}
+    weakest = min(voiced, key=lambda i: events[i]["stress"])
+    strongest = max(voiced, key=lambda i: events[i]["stress"])
+    assert by_event[strongest] > by_event[weakest]
+
+
+def test_unknown_flow_style_means_knock(events):
+    notes = flow.build_flow_notes(events, {"flow_style": "gamelan"}, cull=False)
+    assert {n["drum_class"] for n in notes} == {"knock"}
+
+
+def test_event_index_back_references_the_detect_array(events):
+    notes = flow.build_flow_notes(events, KIT, cull=False)
     for note in notes:
         assert 0 <= note["event_index"] < len(events)
     # Every event is represented exactly once by a syllable-sourced hit.
@@ -32,7 +53,7 @@ def test_event_index_back_references_the_detect_array(events):
 
 
 def test_classes_follow_the_syllable_type(events):
-    notes = flow.build_flow_notes(events, cull=False)
+    notes = flow.build_flow_notes(events, KIT, cull=False)
     by_index = {}
     for note in notes:
         if note["source"] == "syllable":
@@ -70,7 +91,7 @@ def test_min_gap_keeps_the_louder_hit():
 
 def test_accent_class_falls_back_when_unknown(events, monkeypatch):
     monkeypatch.setenv("FLOW_ACCENT_CLASS", "side_stick")
-    notes = flow.build_flow_notes(events, cull=False)
+    notes = flow.build_flow_notes(events, KIT, cull=False)
     assert not any(n["drum_class"] == "side_stick" for n in notes)
 
 

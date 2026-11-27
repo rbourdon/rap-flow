@@ -17,8 +17,8 @@ ingest -> separate -> detect -> groove -> render -> finalize
 
 - **Per-stage workers.** Each stage is its own Modal function (`worker.py`) with
   a resource profile suited to its work: `ingest`, `groove` and `render` run on
-  cheap CPU containers, while `separate` (Demucs) and `detect` (torchcrepe) get a
-  GPU. There is a **single image** — the second, Magenta/TensorFlow one that used
+  cheap CPU containers, while `separate` (Demucs) and `detect` (the speech
+  models) get a GPU. There is a **single image** — the second, Magenta/TensorFlow one that used
   to exist purely for the `groove` stage went away with GrooVAE. Every stage has
   its own timeout and is retried independently.
 - **Durable artifacts + download reuse.** Every stage writes its outputs to a
@@ -58,6 +58,52 @@ whole percussion path, and one invariant sits above all the others:
 `backend/tests/test_flow.py` asserts it with float **equality**, not a tolerance.
 
 ### 1. `detect` — vocal stem → syllable events
+
+The flow layer can only follow the rapper as well as this stage finds the
+syllables, and loudness alone does not find them: two vowels with no dip
+between them read as one, a swallowed schwa as none, a breath as an extra. So
+the default detector (`SYL_DETECTOR=speech`; `syllables.py`, with its three
+models in `speech.py`) works from what is being *said*:
+
+1. **Which phone is sounding.** A wav2vec2 frame classifier over the CMU phone
+   set (`charsiu/en_w2v2_fc_10ms`) labels every 10 ms of the vocal stem. Each
+   run of vowel frames is a syllable nucleus. This needs no lyrics, and is what
+   the detector falls back to for ad-libs, non-English vocals, and anything
+   Whisper could not make out.
+2. **How many syllables there should be.** Whisper (`large-v3-turbo`)
+   transcribes the vocal in windows that start where the rapper does, not on a
+   30 s grid, and any phrase where many vowels are heard but under half as many
+   lyric syllables came back (it skips repeated hooks) is listened to again on
+   its own. The words become phones (CMUdict, a small rap lexicon for
+   "tryna"/"finna"/"'em", `g2p_en` for the rest) and are force-aligned to the
+   classifier's posteriors with a Viterbi pass in which every vowel must last
+   at least 40 ms. A lyric vowel the audio shows no vowel for is dropped (a word
+   Whisper invented, or one the rapper swallowed); vowels heard where the
+   aligner put silence are added back.
+3. **Exactly when each one starts.** A 0.5 MB CNN (`models/onset_refiner.pt`)
+   scores every 2 ms step within ±70 ms of each coarse onset as "the vowel
+   starts here", weighted by a Gaussian prior on the coarse time so it stays
+   put when the audio shows no clear landmark. It was trained on TIMIT's
+   hand-labelled vowel onsets, augmented with drum bleed, doubling, reverb and
+   EQ. The vowel onset is where a listener hears a syllable's beat, and where
+   people tapping along to speech put their taps.
+
+Each event's `strength` is how loud its vowel starts; `stress` adds the lyric's
+word stress (the stressed syllable of a word outranks its unstressed ones) and
+is judged against the two seconds around it. Events also carry `word`, `phone`,
+`lexical_stress`, `source` (`lyrics` | `heard`) and `confidence`.
+
+Measured on hand-labelled speech mixed into a real beat and separated again
+with `htdemucs_ft` (706 syllables): 82% of syllables get a hit within 20 ms and
+92% within 50 ms, median error 4 ms. The loudness-based detector below scores
+52%, 70% and 9 ms on the same audio.
+
+If any model fails to load or run, `detect_syllables` logs it, falls back to the
+loudness-based detector and returns a warning: it costs accuracy, never the job.
+Weights are fetched from the Hugging Face hub on first use and cached on the
+model volume (`HF_HOME`).
+
+#### The loudness-based detector (`SYL_DETECTOR=nucleus`, the fallback)
 
 Two detectors run side by side on the Demucs vocal stem (`pipeline.py`):
 
@@ -111,7 +157,11 @@ Events keep their original keys and add `kind` (`nucleus` | `transient`),
 
 - **Flow layer** (`flow.py`) — one event, one hit, at the event's `t` verbatim.
   No quantization, no grid snapping, no per-bar caps: the syllables already
-  encode the density. A stressed syllable (top 15% of a 2 s window) gets
+  encode the density. With the default `FLOW_STYLE=knock` that hit is always a
+  `knock`, a knuckle on a wooden desk (`kits/default/knock`), and only how hard
+  it lands changes with the syllable's stress: somebody tapping the flow out,
+  with no cymbals and no phrase markers. `FLOW_STYLE=kit` spreads the syllables
+  over the drum kit instead: a stressed syllable (top 15% of a 2 s window) gets
   `FLOW_ACCENT_CLASS` (default `ride`); any other voiced syllable gets a quiet
   `snare` *ghost*; sibilants and plosives get closed hats, the sibilant closing a
   phrase gets an open hat, and a phrase start with high stress adds a `crash`
@@ -249,7 +299,14 @@ These are read from the environment (in Modal, set them as secrets on the
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SYL_DETECTOR` | `nucleus` | `nucleus` (vowel nuclei) or `flux` (the old spectral-flux detector, retained as a fallback and an escape hatch). |
+| `SYL_DETECTOR` | `speech` | `speech` (phone classifier + lyrics + onset refiner), `nucleus` (loudness-based vowel nuclei, its automatic fallback) or `flux` (the old spectral-flux detector, the fallback's fallback). |
+| `SYL_LYRICS` | `1` | Let the `speech` detector transcribe the lyrics. `0` uses heard vowels only: faster, but worse at telling how many syllables a fast line has. |
+| `SYL_PHONE_MODEL` / `SYL_ASR_MODEL` | `charsiu/en_w2v2_fc_10ms` / `openai/whisper-large-v3-turbo` | Hugging Face ids of the phone classifier and of Whisper. |
+
+The rest tune the loudness-based detector and do nothing under `speech`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
 | `SYL_MIN_GAP_MS` | `70` | Minimum spacing between nuclei. |
 | `SYL_PROMINENCE_DB` | `3.0` | Minimum peak prominence of a nucleus, in dB. |
 | `SYL_VOICED_THRESHOLD` | `0.35` | Periodicity above which a frame counts as voiced. |
@@ -268,7 +325,8 @@ These are read from the environment (in Modal, set them as secrets on the
 | `BACKBONE_SNAP_MS` | `25` | Soft-snap window for backbone hits. Keep it tight: the sampled kick plays over the record's own, so a wide snap makes them flam. |
 | `BACKBONE_FILL` | `1` | Insert a missing backbeat snare / beat-1 kick. |
 | `BACKBONE_HATS` | `0` | Let the backbone also play hats (the flow layer owns them by default). |
-| `FLOW_ACCENT_CLASS` | `ride` | Drum class for stressed syllables. A side stick is the idiomatic sound, but `kits/default` ships no rim samples; falls back to `hat_closed` if absent from the kit. |
+| `FLOW_STYLE` | `knock` | `knock` (one desk knock per syllable) or `kit` (syllables spread over ride, ghost snare, hats and crash). |
+| `FLOW_ACCENT_CLASS` | `ride` | `kit` style only. Drum class for stressed syllables. A side stick is the idiomatic sound, but `kits/default` ships no rim samples; falls back to `hat_closed` if absent from the kit. |
 | `FLOW_MIN_GAP_MS` | `45` | Per-class minimum gap in the flow layer (the only culling it does). |
 | `MERGE_SNARE_GUARD_MS` | `60` | Flow ghosts suppressed this close to a bed snare. |
 
@@ -346,9 +404,12 @@ an end-to-end score→mix integration check on synthesised stems. It also covers
 the detection fixes: the torchcrepe decoder choice, the dB prominence gate on
 connected syllables, onset-consonant suppression, the no-voicing warning, and
 kit samples sounding at their note time. The two stages that need the ML stack
-(`separate` → demucs, `detect` → torchcrepe) are covered by stubbing
-`pipeline._crepe_pitch` (or faking `torchcrepe` to check the call); a full
-end-to-end run is a `cli.py` listening pass.
+(`separate` → demucs, `detect` → the speech models or torchcrepe) are covered by
+stubbing: `tests/test_syllables.py` builds the phone classifier's output
+directly and runs everything between it and the syllable list, and
+`pipeline._crepe_pitch` is stubbed (or `torchcrepe` faked to check the call)
+for the loudness-based detector. A full end-to-end run is a `cli.py` listening
+pass.
 
 What the tests can't cover, and what to listen for:
 
